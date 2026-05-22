@@ -8,6 +8,7 @@ from typing import Any
 
 from . import config
 from .scanner import ScanOutcome
+from .dashboard import PLAN_EMOJI, PLAN_ORDER, _ordered_plans
 
 
 # Per-message length budget. Telegram's hard cap is 4096; we stop a
@@ -16,8 +17,7 @@ MAX_MESSAGE_LEN = 3800
 MAX_VALUE_LEN = 400
 
 # Credit line appended to every bot reply so users know who built it.
-# Kept short so it doesn't eat into the per-message length budget.
-BOT_CREDIT = "\U0001f916 Bot by <a href=\"https://t.me/akaza_isnt\">@akaza_isnt</a>"
+BOT_CREDIT = '🤖 Bot by <a href="https://t.me/akaza_isnt">@akaza_isnt</a>'
 
 
 def _esc(value: Any) -> str:
@@ -36,44 +36,104 @@ def _stringify(value: Any) -> str:
 def _truncate(text: str, limit: int = MAX_VALUE_LEN) -> str:
     if len(text) <= limit:
         return text
-    return text[: limit - 1] + "\u2026"  # …
+    return text[: limit - 1] + "…"
 
+
+# ── Plan detection helper ─────────────────────────────────────────────────────
+
+def _detect_plan_label(site_id: str, info: dict[str, Any]) -> str | None:
+    """Pull the best human-readable plan label from an alive account's info."""
+    for key in ("plan_name", "plan", "subscription_tier", "payment_tier",
+                "membership_status", "tier", "subscription_status"):
+        raw = info.get(key)
+        if raw in (None, "", "N/A", "n/a", "none", "null", "unknown"):
+            continue
+        text = str(raw).strip()
+        low = text.lower()
+        if "team/enterprise" in low:
+            return "Team/Enterprise"
+        if "enterprise" in low:
+            return "Enterprise"
+        if "team" in low:
+            return "Team"
+        if "max" in low or "ultra" in low:
+            return "Max"
+        if "plus" in low:
+            return "Plus"
+        if "prime" in low:
+            return "Prime"
+        if "premium" in low:
+            return "Premium"
+        if "pro" in low or "paid" in low or low == "active":
+            return "Pro"
+        if "trial" in low:
+            return "Trial"
+        if "free" in low or low == "basic":
+            return "Free"
+        return text[:60]
+    # fall back to boolean flags
+    if info.get("is_pro") is True or info.get("is_premium") is True:
+        return "Pro"
+    if info.get("is_pro") is False or info.get("is_premium") is False:
+        return "Free"
+    return None
+
+
+def _plan_banner(site_id: str, info: dict[str, Any]) -> str:
+    """Return a one-line plan banner for ALIVE accounts, e.g.  💎 Max Plan"""
+    plan = _detect_plan_label(site_id, info)
+    if not plan:
+        return ""
+    emoji = PLAN_EMOJI.get(plan, "🔹")
+    return f"{emoji} <b>{_esc(plan)} Plan</b>"
+
+
+# ── Single outcome ─────────────────────────────────────────────────────────────
 
 def format_outcome(outcome: ScanOutcome) -> str:
-    """Render a single ``ScanOutcome`` as an HTML message body."""
-    emoji = config.site_emoji(outcome.site)
-    status = "<b>\u2705 ALIVE</b>" if outcome.alive else "<b>\u274c DEAD</b>"
+    """Render a single ScanOutcome as an HTML message body."""
+    emoji  = config.site_emoji(outcome.site)
+    alive  = outcome.alive
 
-    lines = [
-        f"{emoji} <b>{_esc(outcome.site)}</b> \u2014 {status}",
-        f"<i>{_esc(outcome.filename)}</i>  \u00b7  <code>{outcome.elapsed_s:.1f}s</code>",
+    if alive:
+        status = "✅ <b>ALIVE</b>"
+    else:
+        status = "❌ <b>DEAD</b>"
+
+    lines: list[str] = [
+        f"{emoji} <b>{_esc(outcome.site)}</b>  ·  {status}",
+        f"<i>{_esc(outcome.filename)}</i>  ·  <code>{outcome.elapsed_s:.1f}s</code>",
     ]
 
+    # Plan banner for alive hits
+    if alive and outcome.info:
+        banner = _plan_banner(outcome.site, outcome.info)
+        if banner:
+            lines.append("")
+            lines.append(banner)
+
+    # Error note
     if outcome.error:
         lines.append("")
-        lines.append(f"\u26a0\ufe0f {_esc(_truncate(outcome.error, 800))}")
+        lines.append(f"⚠️ {_esc(_truncate(outcome.error, 800))}")
 
+    # Account info table
     if outcome.info:
         lines.append("")
         lines.append("<pre>")
-        # sort for stable ordering, but prefer the high-signal keys first
         priority = (
-            "email",
-            "name",
-            "username",
-            "plan",
-            "is_pro",
-            "id",
-            "user_id",
-            "subscription_status",
-            "renewal",
-            "renewal_date",
-            "renewal_timestamp",
-            "expires_at",
-            "session_expires",
-            "session_issued",
-            "country",
-            "token_expires",
+            "email", "name", "username",
+            "plan", "plan_name", "subscription_tier", "payment_tier",
+            "is_pro", "is_premium",
+            "id", "user_id",
+            "subscription_status", "membership_status",
+            "renewal", "renewal_date", "renewal_timestamp",
+            "expires_at", "next_payment_date",
+            "billing_period_start", "billing_period_end",
+            "session_expires", "session_issued",
+            "country", "token_expires",
+            "usage_5h", "usage_7d",
+            "organization", "billing_type", "rate_limit_tier",
         )
         seen: set[str] = set()
         ordered: list[tuple[str, Any]] = []
@@ -82,67 +142,174 @@ def format_outcome(outcome: ScanOutcome) -> str:
                 ordered.append((key, outcome.info[key]))
                 seen.add(key)
         for key in sorted(outcome.info.keys()):
-            if key in seen:
-                continue
-            ordered.append((key, outcome.info[key]))
+            if key not in seen:
+                ordered.append((key, outcome.info[key]))
 
         for key, value in ordered:
             text_val = _truncate(_stringify(value))
             lines.append(f"{_esc(key)}: {_esc(text_val)}")
         lines.append("</pre>")
 
+    # Refreshed cookies
     if outcome.refreshed_cookies:
         lines.append("")
-        lines.append("\U0001f504 <b>Refreshed cookies</b> (replace these in your jar):")
+        lines.append("🔄 <b>Refreshed cookies</b> (update your jar):")
         for name, value in outcome.refreshed_cookies.items():
-            # Don't truncate — the whole point is to give the user back a
-            # usable cookie. Telegram's 4096-char cap is enforced below.
             lines.append(f"<code>{_esc(name)}</code>")
             lines.append(f"<pre>{_esc(value)}</pre>")
 
     body = "\n".join(lines)
-    # Reserve space for the credit footer so truncation never eats it.
     body_budget = MAX_MESSAGE_LEN - len(BOT_CREDIT) - 2
     if len(body) > body_budget:
-        body = body[: body_budget - 40] + "\n\u2026 (truncated)"
+        body = body[: body_budget - 40] + "\n… (truncated)"
     return body + "\n\n" + BOT_CREDIT
 
 
-def format_summary(outcomes: list[ScanOutcome]) -> str:
-    """Compact one-liner summary used when a zip yields many results."""
-    alive = sum(1 for o in outcomes if o.alive)
-    dead = sum(1 for o in outcomes if not o.alive)
-    return (
-        f"\U0001f9ee Scanned <b>{len(outcomes)}</b> file(s) "
-        f"\u2014 <b>\u2705 {alive}</b> alive / <b>\u274c {dead}</b> dead"
-        f"\n\n{BOT_CREDIT}"
-    )
+# ── Scan summary ───────────────────────────────────────────────────────────────
 
+def format_summary(outcomes: list[ScanOutcome], site_id: str = "") -> str:
+    """Rich summary card shown after a multi-file / zip scan."""
+    total  = len(outcomes)
+    alive  = sum(1 for o in outcomes if o.alive)
+    dead   = total - alive
+    rate   = f"{alive / total * 100:.1f}%" if total > 0 else "—"
+
+    emoji  = config.site_emoji(site_id) if site_id else "🍪"
+    label  = config.site_label(site_id) if site_id else "All sites"
+
+    # Build plan breakdown
+    plan_counts: dict[str, int] = {}
+    for o in outcomes:
+        if not o.alive:
+            continue
+        plan = _detect_plan_label(o.site, o.info or {})
+        if plan:
+            plan_counts[plan] = plan_counts.get(plan, 0) + 1
+
+    lines: list[str] = [
+        f"{emoji} <b>{_esc(label)}  —  Scan Complete</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"  🧮 Scanned : <b>{total}</b> file(s)",
+        f"  ✅ Alive   : <b>{alive}</b>  ({rate})",
+        f"  ❌ Dead    : <b>{dead}</b>",
+    ]
+
+    if plan_counts:
+        ordered = _ordered_plans(site_id, plan_counts) if site_id else sorted(plan_counts.items(), key=lambda x: -x[1])
+        lines.append("")
+        lines.append("  <b>Plan breakdown:</b>")
+        for plan, count in ordered:
+            pe = PLAN_EMOJI.get(plan, "🔹")
+            lines.append(f"    {pe} {_esc(plan)} : <b>{count}</b>")
+
+    # List alive accounts (up to 10) with email + plan
+    alive_outcomes = [o for o in outcomes if o.alive]
+    if alive_outcomes:
+        lines.append("")
+        lines.append("  <b>Alive accounts:</b>")
+        shown = alive_outcomes[:10]
+        for i, o in enumerate(shown, 1):
+            info = o.info or {}
+            email = (info.get("email") or info.get("username") or info.get("user_id") or "—")
+            plan  = _detect_plan_label(o.site, info) or "?"
+            pe    = PLAN_EMOJI.get(plan, "🔹")
+            lines.append(
+                f"    {i}. <code>{_esc(_truncate(str(email), 40))}</code>  {pe} {_esc(plan)}"
+            )
+        if len(alive_outcomes) > 10:
+            lines.append(f"    … and <b>{len(alive_outcomes) - 10}</b> more")
+
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        BOT_CREDIT,
+    ])
+
+    body = "\n".join(lines)
+    if len(body) > MAX_MESSAGE_LEN:
+        body = body[: MAX_MESSAGE_LEN - 40] + "\n… (truncated)\n\n" + BOT_CREDIT
+    return body
+
+
+# ── Hit notification ───────────────────────────────────────────────────────────
 
 def format_hit(outcome: ScanOutcome) -> str:
-    """Hit-style notification body sent when an ALIVE result lands.
-
-    Kept terse on purpose; the full info still ships in the main result
-    message that's sent alongside.
-    """
+    """Caption for the ALIVE cookie file sent as a hit notification."""
     emoji = config.site_emoji(outcome.site)
-    info = outcome.info or {}
-    email = info.get("email") or info.get("username") or info.get("user_id") or "n/a"
-    plan = info.get("plan") or info.get("subscription_tier") or info.get("payment_tier") or "n/a"
+    info  = outcome.info or {}
+
+    email   = (info.get("email") or info.get("username") or info.get("user_id") or "n/a")
+    plan    = _detect_plan_label(outcome.site, info) or "n/a"
+    pe      = PLAN_EMOJI.get(plan, "🔹")
     renewal = (
-        info.get("renewal")
-        or info.get("renewal_date")
-        or info.get("expires_at")
-        or info.get("session_expires")
-        or "n/a"
+        info.get("renewal") or info.get("renewal_date") or
+        info.get("expires_at") or info.get("next_payment_date") or
+        info.get("session_expires") or "n/a"
     )
+
     lines = [
-        f"\U0001f6a8 <b>HIT</b> \u2014 {emoji} <b>{_esc(outcome.site)}</b>",
-        f"\U0001f4e7 <code>{_esc(_truncate(str(email), 200))}</code>",
-        f"\U0001f4b3 plan: <code>{_esc(_truncate(str(plan), 200))}</code>",
-        f"\U0001f4c5 renewal/expiry: <code>{_esc(_truncate(str(renewal), 200))}</code>",
-        f"\U0001f4ce <i>{_esc(outcome.filename)}</i>",
+        f"🚨 <b>HIT</b>  ·  {emoji} <b>{_esc(outcome.site)}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"  📧 Email   : <code>{_esc(_truncate(str(email), 200))}</code>",
+        f"  {pe} Plan    : <code>{_esc(_truncate(str(plan), 200))}</code>",
+        f"  📅 Renewal : <code>{_esc(_truncate(str(renewal), 200))}</code>",
+        f"  📎 File    : <i>{_esc(outcome.filename)}</i>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
         BOT_CREDIT,
     ]
+    return "\n".join(lines)
+
+
+# ── Final delivery summary (sent at very end) ──────────────────────────────────
+
+def format_delivery_summary(
+    site_id: str,
+    outcomes: list[ScanOutcome],
+    premium_sent: bool,
+    free_available: int,
+) -> str:
+    """Full recap card sent at the end of a scan batch."""
+    total  = len(outcomes)
+    alive  = sum(1 for o in outcomes if o.alive)
+    dead   = total - alive
+    emoji  = config.site_emoji(site_id)
+    label  = config.site_label(site_id)
+
+    # Collect plan counts
+    plan_counts: dict[str, int] = {}
+    for o in outcomes:
+        if not o.alive:
+            continue
+        plan = _detect_plan_label(o.site, o.info or {})
+        if plan:
+            plan_counts[plan] = plan_counts.get(plan, 0) + 1
+
+    lines: list[str] = [
+        f"{emoji} <b>{_esc(label)}  —  Results Summary</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"  🧮 Checked  : <b>{total}</b>",
+        f"  ✅ Alive    : <b>{alive}</b>",
+        f"  ❌ Dead     : <b>{dead}</b>",
+    ]
+
+    if plan_counts:
+        ordered = _ordered_plans(site_id, plan_counts)
+        lines.append("")
+        lines.append("  <b>What you got:</b>")
+        for plan, count in ordered:
+            pe = PLAN_EMOJI.get(plan, "🔹")
+            lines.append(f"    {pe} {_esc(plan)} : <b>{count}</b>")
+
+    lines.append("")
+    if premium_sent:
+        lines.append("  📦 Premium cookie <code>.zip</code> sent above ☝️")
+    if free_available > 0:
+        lines.append(f"  🆓 {free_available} free account cookie(s) available — reply <b>yes</b> to get them")
+
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        BOT_CREDIT,
+    ])
     return "\n".join(lines)

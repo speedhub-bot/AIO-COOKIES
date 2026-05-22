@@ -44,6 +44,8 @@ def _empty_dashboard() -> dict[str, Any]:
                 "alive": 0,
                 "dead": 0,
                 "plans": {},
+                "premium": 0,
+                "free": 0,
             }
             for site in config.SUPPORTED_SITES
         },
@@ -107,7 +109,7 @@ def _normalise_dashboard(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, dict):
             continue
         site = dashboard["sites"].setdefault(
-            str(site_id), {"total": 0, "alive": 0, "dead": 0, "plans": {}}
+            str(site_id), {"total": 0, "alive": 0, "dead": 0, "plans": {}, "premium": 0, "free": 0}
         )
         for key in ("total", "alive", "dead"):
             try:
@@ -265,7 +267,7 @@ async def record_scan_outcomes(outcomes: list[Any]) -> None:
             site_id = str(getattr(outcome, "site", "") or "unknown")
             alive = bool(getattr(outcome, "alive", False))
             site = dashboard["sites"].setdefault(
-                site_id, {"total": 0, "alive": 0, "dead": 0, "plans": {}}
+                site_id, {"total": 0, "alive": 0, "dead": 0, "plans": {}, "premium": 0, "free": 0}
             )
             dashboard["total"] += 1
             site["total"] += 1
@@ -288,3 +290,19 @@ async def get_dashboard_stats() -> dict[str, Any]:
     async with _LOCK:
         dashboard = await _ensure_dashboard_loaded()
         return json.loads(json.dumps(dashboard))
+
+
+
+async def record_tier_counts(site_id: str, premium: int, free: int) -> None:
+    """Increment the premium / free alive counters for *site_id*."""
+    if premium == 0 and free == 0:
+        return
+    async with _LOCK:
+        dashboard = await _ensure_dashboard_loaded()
+        site = dashboard["sites"].setdefault(
+            str(site_id),
+            {"total": 0, "alive": 0, "dead": 0, "plans": {}, "premium": 0, "free": 0},
+        )
+        site["premium"] = int(site.get("premium", 0) or 0) + premium
+        site["free"]    = int(site.get("free",    0) or 0) + free
+        await asyncio.to_thread(_save_dashboard_sync, dashboard)
