@@ -175,6 +175,7 @@ class RobloxAdapter(SiteAdapter):
         warning = self.cookies_warning()
         if warning:
             result.error = warning
+            result.is_dead = True
             return result
 
         headers = self.common_headers()
@@ -186,6 +187,7 @@ class RobloxAdapter(SiteAdapter):
             # ``id`` / ``name`` / ``displayName``.
             self._refresh_roblosecurity(http, result)
             if result.error and "cookie dead" in result.error:
+                result.is_dead = True
                 return result
 
             # 1) Authenticated user — alive check (now using the fresh cookie).
@@ -196,13 +198,17 @@ class RobloxAdapter(SiteAdapter):
             )
             if r.status_code == 401:
                 result.error = "/v1/users/authenticated returned 401 (cookie dead)"
+                result.is_dead = True
                 return result
             if r.status_code != 200:
                 result.error = f"/v1/users/authenticated returned HTTP {r.status_code}"
+                if r.status_code == 403:
+                    result.is_dead = True
                 return result
             data = self.try_json(r)
             if not isinstance(data, dict) or not data.get("id"):
                 result.error = "authenticated endpoint returned no user id"
+                result.is_dead = True
                 return result
 
             user_id = data.get("id")

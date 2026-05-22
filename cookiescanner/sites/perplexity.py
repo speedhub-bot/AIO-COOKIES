@@ -47,6 +47,7 @@ class PerplexityAdapter(SiteAdapter):
         warning = self.cookies_warning()
         if warning:
             result.error = warning
+            result.is_dead = True
             return result
 
         with self.make_client(extra_headers=self.common_headers()) as http:
@@ -54,10 +55,18 @@ class PerplexityAdapter(SiteAdapter):
             url = self.BASE_URL + "/api/auth/session"
             r = http.get(url)
             result.endpoints_tried.append({"url": url, "status": r.status_code, "len": len(r.text)})
+            if r.status_code in (401, 403):
+                result.error = (
+                    f"/api/auth/session returned HTTP {r.status_code} "
+                    "(cookie unauthorized)"
+                )
+                result.is_dead = True
+                return result
             data = self.try_json(r) or {}
             user = data.get("user") if isinstance(data, dict) else None
             if not user:
                 result.error = "/api/auth/session returned no user (cookie expired or wrong jar)"
+                result.is_dead = True
                 return result
 
             result.alive = True

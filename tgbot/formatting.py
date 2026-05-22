@@ -93,6 +93,11 @@ def format_outcome(outcome: ScanOutcome) -> str:
 
     if alive:
         status = "✅ <b>ALIVE</b>"
+    elif outcome.is_dead:
+        # Authoritative dead-cookie verdict from the adapter (401,
+        # expired JWT, login redirect…). Show DEAD even if the adapter
+        # also attached an ``error`` string for diagnostics.
+        status = "❌ <b>DEAD</b>"
     elif outcome.error:
         status = "⚠️ <b>ERROR</b>"
     else:
@@ -169,8 +174,16 @@ def format_summary(outcomes: list[ScanOutcome], site_id: str = "") -> str:
     """Rich summary card shown after a multi-file / zip scan."""
     total  = len(outcomes)
     alive  = sum(1 for o in outcomes if o.alive)
-    errd   = sum(1 for o in outcomes if (not o.alive) and o.error)
-    dead   = total - alive - errd
+    # is_dead wins over error for bucketing: an adapter that has confirmed
+    # the cookie is dead may still attach an error message for debugging.
+    dead   = sum(1 for o in outcomes if (not o.alive) and o.is_dead)
+    errd   = sum(
+        1 for o in outcomes
+        if (not o.alive) and (not o.is_dead) and o.error
+    )
+    # Anything left over (alive=False, no is_dead, no error) is also dead
+    # — old adapters that haven't been updated still land here cleanly.
+    dead  += total - alive - dead - errd
     rate   = f"{alive / total * 100:.1f}%" if total > 0 else "—"
 
     emoji  = config.site_emoji(site_id) if site_id else "🍪"
@@ -273,8 +286,12 @@ def format_delivery_summary(
     """Full recap card sent at the end of a scan batch."""
     total  = len(outcomes)
     alive  = sum(1 for o in outcomes if o.alive)
-    errd   = sum(1 for o in outcomes if (not o.alive) and o.error)
-    dead   = total - alive - errd
+    dead   = sum(1 for o in outcomes if (not o.alive) and o.is_dead)
+    errd   = sum(
+        1 for o in outcomes
+        if (not o.alive) and (not o.is_dead) and o.error
+    )
+    dead  += total - alive - dead - errd
     emoji  = config.site_emoji(site_id)
     label  = config.site_label(site_id)
 

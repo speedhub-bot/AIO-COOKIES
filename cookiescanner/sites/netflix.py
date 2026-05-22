@@ -37,6 +37,7 @@ class NetflixAdapter(SiteAdapter):
         warning = self.cookies_warning()
         if warning:
             result.error = warning
+            result.is_dead = True
             return result
 
         headers = {
@@ -72,6 +73,7 @@ class NetflixAdapter(SiteAdapter):
                     result.error = (
                         f"membership page redirected to login ({location})"
                     )
+                    result.is_dead = True
                     return result
                 if location.startswith("/"):
                     location = self.BASE_URL + location
@@ -97,12 +99,14 @@ class NetflixAdapter(SiteAdapter):
             if "/login" in text and "isLoggedIn" not in text and "reactContext" not in text:
                 # Some accounts render a tiny redirect shim.
                 result.error = "membership page rendered login shim (cookie dead)"
+                result.is_dead = True
                 return result
 
             _absorb_membership(text, result.info)
             if not (result.info.get("plan") or result.info.get("email")):
                 # If we got HTTP 200 but extracted nothing, treat as dead.
                 result.error = "membership page returned no account data"
+                result.is_dead = True
                 return result
             result.alive = True
 

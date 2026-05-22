@@ -61,6 +61,7 @@ class PrimeVideoAdapter(SiteAdapter):
         warning = self.cookies_warning()
         if warning:
             result.error = warning
+            result.is_dead = True
             return result
 
         ua = (
@@ -86,9 +87,11 @@ class PrimeVideoAdapter(SiteAdapter):
             location = r.headers.get("location") or r.headers.get("Location") or ""
             if r.status_code in (301, 302, 303, 307, 308) and "signin" in location.lower():
                 result.error = f"storefront redirected to {location} (cookie dead)"
+                result.is_dead = True
                 return result
             if r.status_code == 401 or r.status_code == 403:
                 result.error = f"storefront returned HTTP {r.status_code}"
+                result.is_dead = True
                 return result
             if r.status_code != 200:
                 result.error = f"storefront returned HTTP {r.status_code}"
@@ -97,6 +100,7 @@ class PrimeVideoAdapter(SiteAdapter):
             text = r.text or ""
             if "ap/signin" in text and len(text) < 2048:
                 result.error = "storefront body contained signin redirect (cookie dead)"
+                result.is_dead = True
                 return result
 
             _absorb_storefront(text, result.info)
@@ -122,6 +126,7 @@ class PrimeVideoAdapter(SiteAdapter):
 
         if not (result.info.get("region") or result.info.get("customerID")):
             result.error = "storefront responded but no region/customer id surfaced"
+            result.is_dead = True
             return result
 
         result.alive = True

@@ -90,17 +90,17 @@ TEMP_DIR: Path = Path(_str("TEMP_DIR", "/tmp/aiocookies-bot"))
 
 # ── Channel gate ─────────────────────────────────────────────
 # Public username OR numeric id of the channel users must join.
-# e.g.  REQUIRED_CHANNEL=@akaza_isnt  or  REQUIRED_CHANNEL=-1001234567890
+# e.g.  REQUIRED_CHANNEL=@akazacheck  or  REQUIRED_CHANNEL=-1001234567890
 # ⚠️  The bot MUST be added to this channel as administrator for the
 #    membership check to work — otherwise every new user will see the
 #    "Access Denied" join prompt and never get past it.
-REQUIRED_CHANNEL: str = _str("REQUIRED_CHANNEL", "@akaza_isnt")
+REQUIRED_CHANNEL: str = _str("REQUIRED_CHANNEL", "@akazacheck")
 # Invite link shown to users who haven't joined yet.
 REQUIRED_CHANNEL_INVITE: str = _str(
-    "REQUIRED_CHANNEL_INVITE", "https://t.me/akaza_isnt"
+    "REQUIRED_CHANNEL_INVITE", "https://t.me/akazacheck"
 )
 # Display name shown on the join button
-CHANNEL_DISPLAY_NAME: str = _str("CHANNEL_DISPLAY_NAME", "@akaza_isnt 👑")
+CHANNEL_DISPLAY_NAME: str = _str("CHANNEL_DISPLAY_NAME", "@akazacheck 👑")
 
 # Sleep (in seconds) between consecutive cookie checks inside a zip
 # scan. Slowing the scan down a touch keeps the bot from flooding

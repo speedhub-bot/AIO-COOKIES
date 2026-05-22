@@ -67,6 +67,14 @@ class ScanOutcome:
     alive: bool
     info: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    # Authoritative "cookie is definitely dead" flag, set by adapters
+    # for unambiguous dead cases (401 unauthorized, login redirect, JWT
+    # expired, required auth cookie missing). Used by the dashboard /
+    # summary cards to bucket counts as alive / dead / errored without
+    # the old "any error string at all => errored" foot-gun, which made
+    # every dead Claude / Manus cookie show up under "errored" rather
+    # than "dead".
+    is_dead: bool = False
     cookies: list[dict[str, Any]] = field(default_factory=list)
     elapsed_s: float = 0.0
     # Cookies the underlying adapter *rotated* during the scan, e.g.
@@ -108,32 +116,34 @@ def jar_from_cookies(cookies: Iterable[dict[str, Any]]) -> CookieJar:
 
 def _scan_legacy(
     site_id: str, cookies: list[dict[str, Any]], proxy: str | None
-) -> tuple[bool, dict[str, Any], str | None, dict[str, str]]:
+) -> tuple[bool, dict[str, Any], str | None, dict[str, str], bool]:
     checker = legacy.CHECKERS.get(site_id)
     if checker is None:
-        return False, {}, f"no legacy checker for {site_id}", {}
+        return False, {}, f"no legacy checker for {site_id}", {}, False
     result = checker(cookies, proxy=proxy)
     return (
         bool(result.get("alive")),
         dict(result.get("info") or {}),
         result.get("error"),
         dict(result.get("refreshed_cookies") or {}),
+        bool(result.get("is_dead")),
     )
 
 
 def _scan_cookiescanner(
     site_id: str, cookies: list[dict[str, Any]], proxy: str | None
-) -> tuple[bool, dict[str, Any], str | None, dict[str, str]]:
+) -> tuple[bool, dict[str, Any], str | None, dict[str, str], bool]:
     jar = jar_from_cookies(cookies)
     results = cs_scan_all(jar, proxy=proxy, only=[site_id])
     if not results:
-        return False, {}, f"cookiescanner returned no result for {site_id}", {}
+        return False, {}, f"cookiescanner returned no result for {site_id}", {}, False
     r = results[0]
     return (
         bool(r.alive),
         dict(r.info or {}),
         r.error,
         dict(r.refreshed_cookies or {}),
+        bool(getattr(r, "is_dead", False)),
     )
 
 
@@ -160,9 +170,9 @@ def scan_one_sync(
     proxy = proxy or (config.DEFAULT_PROXY or None)
 
     if site_id in LEGACY_SITES:
-        alive, info, err, refreshed = _scan_legacy(site_id, cookies, proxy)
+        alive, info, err, refreshed, is_dead = _scan_legacy(site_id, cookies, proxy)
     elif site_id in CS_SITES:
-        alive, info, err, refreshed = _scan_cookiescanner(site_id, cookies, proxy)
+        alive, info, err, refreshed, is_dead = _scan_cookiescanner(site_id, cookies, proxy)
     else:
         return ScanOutcome(
             site=site_id,
@@ -178,6 +188,7 @@ def scan_one_sync(
         alive=alive,
         info=info,
         error=err,
+        is_dead=is_dead,
         cookies=cookies,
         elapsed_s=time.monotonic() - start,
         refreshed_cookies=refreshed,

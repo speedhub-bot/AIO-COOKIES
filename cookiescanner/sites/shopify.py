@@ -79,6 +79,7 @@ class ShopifyAdapter(SiteAdapter):
         warning = self.cookies_warning()
         if warning:
             result.error = warning
+            result.is_dead = True
             return result
 
         cookies = self.host_cookies()
@@ -155,6 +156,7 @@ class ShopifyAdapter(SiteAdapter):
                     "(invalid_credentials)"
                 )
                 result.alive = False
+                result.is_dead = True
             elif admin_signal == "no_cookie_auth_token":
                 # The admin scope token has expired; the identity scope
                 # *may* still be alive. Use cookie presence as a proxy
@@ -172,6 +174,7 @@ class ShopifyAdapter(SiteAdapter):
                         "admin requires a fresh auth token and no "
                         "identity_session cookie was supplied"
                     )
+                    result.is_dead = True
             elif admin_signal is None:
                 result.error = (
                     "admin.shopify.com returned no recognisable signal "

@@ -66,6 +66,7 @@ class SpotifyAdapter(SiteAdapter):
                 "Spotify session requires the sp_dc auth cookie; "
                 f"found only {present or 'tracker-only cookies'}."
             )
+            result.is_dead = True
             return result
 
         ua = (
@@ -98,6 +99,7 @@ class SpotifyAdapter(SiteAdapter):
                         f"/account/overview/ redirected to login "
                         f"({location[:90]}); cookie dead"
                     )
+                    result.is_dead = True
                     return result
                 # Geo redirect: /<lang>/account/overview/ — follow it.
                 if location.startswith("/"):
@@ -120,6 +122,7 @@ class SpotifyAdapter(SiteAdapter):
                             f"geo-prefixed overview also redirected to "
                             f"login ({loc2[:90]}); cookie dead"
                         )
+                        result.is_dead = True
                     else:
                         result.error = (
                             f"geo-prefixed overview returned HTTP "
@@ -130,6 +133,8 @@ class SpotifyAdapter(SiteAdapter):
                 result.error = (
                     f"/account/overview/ returned HTTP {r.status_code}"
                 )
+                if r.status_code in (401, 403):
+                    result.is_dead = True
                 return result
 
             # At this point r is a 200 HTML page from /<lang>/account/overview/.
