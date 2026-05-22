@@ -93,6 +93,8 @@ def format_outcome(outcome: ScanOutcome) -> str:
 
     if alive:
         status = "✅ <b>ALIVE</b>"
+    elif outcome.error:
+        status = "⚠️ <b>ERROR</b>"
     else:
         status = "❌ <b>DEAD</b>"
 
@@ -167,7 +169,8 @@ def format_summary(outcomes: list[ScanOutcome], site_id: str = "") -> str:
     """Rich summary card shown after a multi-file / zip scan."""
     total  = len(outcomes)
     alive  = sum(1 for o in outcomes if o.alive)
-    dead   = total - alive
+    errd   = sum(1 for o in outcomes if (not o.alive) and o.error)
+    dead   = total - alive - errd
     rate   = f"{alive / total * 100:.1f}%" if total > 0 else "—"
 
     emoji  = config.site_emoji(site_id) if site_id else "🍪"
@@ -189,6 +192,8 @@ def format_summary(outcomes: list[ScanOutcome], site_id: str = "") -> str:
         f"  ✅ Alive   : <b>{alive}</b>  ({rate})",
         f"  ❌ Dead    : <b>{dead}</b>",
     ]
+    if errd > 0:
+        lines.append(f"  ⚠️ Errored : <b>{errd}</b>")
 
     if plan_counts:
         ordered = _ordered_plans(site_id, plan_counts) if site_id else sorted(plan_counts.items(), key=lambda x: -x[1])
@@ -268,7 +273,8 @@ def format_delivery_summary(
     """Full recap card sent at the end of a scan batch."""
     total  = len(outcomes)
     alive  = sum(1 for o in outcomes if o.alive)
-    dead   = total - alive
+    errd   = sum(1 for o in outcomes if (not o.alive) and o.error)
+    dead   = total - alive - errd
     emoji  = config.site_emoji(site_id)
     label  = config.site_label(site_id)
 
@@ -288,6 +294,8 @@ def format_delivery_summary(
         f"  ✅ Alive    : <b>{alive}</b>",
         f"  ❌ Dead     : <b>{dead}</b>",
     ]
+    if errd > 0:
+        lines.append(f"  ⚠️ Errored  : <b>{errd}</b>")
 
     if plan_counts:
         ordered = _ordered_plans(site_id, plan_counts)

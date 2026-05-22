@@ -572,8 +572,10 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer("🗑 All proxies cleared.", show_alert=False)
         await _show_proxy_panel(update, context, 0); return
 
-
+    # ── adm_user:premium|free|admin|ban|unban:<uid> ───────────
+    if data.startswith("adm_user:") and not data.startswith("adm_user:view"):
         parts = data.split(":")
+        if len(parts) < 3: return
         action, uid = parts[1], int(parts[2])
         if action in (config.ROLE_FREE, config.ROLE_PREMIUM, config.ROLE_ADMIN):
             u = await storage.set_user_role(uid, action)
@@ -694,17 +696,42 @@ def _mask_proxy(proxy: str) -> str:
 
 
 def _parse_proxy_text(text: str) -> list[str]:
-    """Extract valid proxy strings from free-form text."""
+    """Extract valid proxy strings from free-form text.
+
+    Accepted formats (one per line):
+      http://host:port
+      http://user:pass@host:port
+      socks5://host:port
+      host:port                        → treated as http://host:port
+      host:port:user:pass              → http://user:pass@host:port
+      user:pass@host:port              → http://user:pass@host:port
+    """
     lines = []
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        # accept bare host:port as http://
+
+        # already has a scheme — use as-is
         if line.startswith(("http://", "https://", "socks5://", "socks4://")):
             lines.append(line)
-        elif ":" in line and not line.startswith("//"):
+            continue
+
+        # user:pass@host:port  (no scheme)
+        if "@" in line:
             lines.append("http://" + line)
+            continue
+
+        parts = line.split(":")
+        if len(parts) == 4:
+            # host:port:user:pass  ← your format
+            host, port, user, passwd = parts
+            lines.append(f"http://{user}:{passwd}@{host}:{port}")
+        elif len(parts) == 2:
+            # host:port
+            lines.append("http://" + line)
+        # anything else we skip silently
+
     return lines
 
 

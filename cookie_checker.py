@@ -961,7 +961,26 @@ def check_crunchyroll(cookies: list[dict], proxy: str | None = None) -> dict:
                             items = subs.get("items", subs.get("data", []))
                             if items:
                                 sub = items[0] if isinstance(items, list) else items
-                                result["info"]["plan"] = sub.get("name", sub.get("sku", "Premium"))
+                                # Crunchyroll's actual SKU/name strings come back as
+                                # `crunchyroll.fanpack.monthly` / `…megafanpack…` /
+                                # `…ultimatefanpack…`. Map them to the user-visible
+                                # tier names the dashboard buckets by.
+                                _raw_name = (sub.get("name") or "").lower()
+                                _raw_sku  = (sub.get("sku")  or "").lower()
+                                _haystack = f"{_raw_name} {_raw_sku}"
+                                if "ultimate" in _haystack or "ultimatefan" in _haystack:
+                                    plan_name = "Ultimate Fan"
+                                elif "megafan" in _haystack or "mega fan" in _haystack or "mega" in _haystack:
+                                    plan_name = "Mega Fan"
+                                elif "fanpack" in _haystack or _raw_name == "fan" or "fan" in _haystack:
+                                    plan_name = "Fan"
+                                elif sub.get("name"):
+                                    plan_name = sub.get("name")
+                                else:
+                                    plan_name = "Premium"
+                                result["info"]["plan"]      = plan_name
+                                result["info"]["plan_name"] = plan_name
+                                result["info"]["plan_sku"]  = sub.get("sku", "N/A")
                                 result["info"]["subscription_active"] = True
                                 # Renewal/expiry dates
                                 result["info"]["effective_date"] = sub.get("effective_date", "N/A")

@@ -49,7 +49,19 @@ from .scanner import ScanOutcome, dump_netscape, scan_site
 # ═══════════════════════════════════════════════════════════════
 
 async def _is_member(bot, user_id: int) -> bool:
-    """Return True if *user_id* is a member of the required channel."""
+    """Return True if *user_id* is a member of the required channel.
+
+    Fail-closed: if Telegram returns any error checking membership
+    (channel doesn't exist, bot isn't admin in the channel, etc.) we
+    return False so the user is shown the join screen. Otherwise the
+    gate becomes a no-op and new users sail straight through.
+
+    The admin-id (config.ADMIN_ID) is always exempt — checked by callers
+    so the bot owner can never lock themselves out by misconfiguring
+    REQUIRED_CHANNEL.
+    """
+    if not config.REQUIRED_CHANNEL:
+        return True
     try:
         member = await bot.get_chat_member(config.REQUIRED_CHANNEL, user_id)
         return member.status in (
@@ -57,9 +69,15 @@ async def _is_member(bot, user_id: int) -> bool:
             ChatMemberStatus.ADMINISTRATOR,
             ChatMemberStatus.OWNER,
         )
-    except TelegramError:
-        # If the bot isn't in the channel or channel doesn't exist, let through
-        return True
+    except TelegramError as exc:
+        # Channel-not-found / bot-not-admin / private-chat-not-supported all
+        # land here. Log once per error so the admin can see why no one is
+        # being let through; default behaviour is fail-closed (show join btn).
+        logger.warning(
+            "Channel gate: get_chat_member({}, {}) failed: {}",
+            config.REQUIRED_CHANNEL, user_id, exc,
+        )
+        return False
 
 
 def _join_keyboard() -> InlineKeyboardMarkup:
@@ -486,7 +504,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         is_zip = ext == ".zip" or zipfile.is_zipfile(tmp_path)
         if is_zip:
-            outcomes = await _scan_zip_with_progress(
+            outcomes, hits_already_sent = await _scan_zip_with_progress(
                 status_msg, site_id, tmp_path, filename, user, context)
         else:
             await status_msg.edit_text(
@@ -501,6 +519,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except Exception as exc:
                 logger.exception("Scan failed for user {}", user.id)
                 await status_msg.edit_text(f"❌ Scan error: {exc}"); return
+            hits_already_sent = set()
 
         try: await status_msg.delete()
         except BadRequest: pass
@@ -512,7 +531,8 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         try: await storage.record_user_scan(user.id, site_id, outcomes)
         except Exception: logger.exception("User scan record failed")
 
-        await _deliver_outcomes(update, context, site_id, outcomes)
+        await _deliver_outcomes(update, context, site_id, outcomes,
+                                hits_already_sent=hits_already_sent)
     finally:
         try: os.remove(tmp_path)
         except OSError: pass
@@ -530,7 +550,12 @@ async def _scan_zip_with_progress(
     display_name: str,
     user,
     context: ContextTypes.DEFAULT_TYPE,
-) -> list[ScanOutcome]:
+) -> tuple[list[ScanOutcome], set[int]]:
+    """Scan a zip with live progress.
+
+    Returns ``(outcomes, hit_indices_already_sent)`` so the caller can
+    avoid re-sending the same hit notifications during _deliver_outcomes.
+    """
     import zipfile as _zf, time as _t
 
     try:
@@ -543,18 +568,24 @@ async def _scan_zip_with_progress(
     total_files = max(len(names), 1)
     outcomes: list[ScanOutcome] = []
     plan_counts: dict[str, int] = {}
-    alive_count = dead_count = 0
+    alive_count = dead_count = err_count = 0
     hit_on      = await storage.get_hit_notifications(user.id)
+    hits_sent: set[int] = set()
     _last_edit  = 0.0
+    scan_started = _t.monotonic()
 
     async def _upd(current_file: str = "") -> None:
         nonlocal _last_edit
         now = _t.monotonic()
         if now - _last_edit < 1.5 and current_file: return
         _last_edit = now
+        # checks-per-minute over the active scan window
+        elapsed = max(now - scan_started, 0.001)
+        cpm = (len(outcomes) / elapsed) * 60.0 if outcomes else 0.0
         text = format_scan_dashboard(
             site_id, len(outcomes), total_files,
-            alive_count, dead_count, plan_counts, current_file)
+            alive_count, dead_count, plan_counts, current_file,
+            errored=err_count, cpm=cpm)
         try: await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
         except BadRequest: pass
 
@@ -566,8 +597,8 @@ async def _scan_zip_with_progress(
             with _zf.ZipFile(zip_path) as zf:
                 zf.extractall(extract_dir)
         except Exception as exc:
-            return [ScanOutcome(site=site_id, filename=display_name,
-                                alive=False, error=f"bad zip: {exc}")]
+            return ([ScanOutcome(site=site_id, filename=display_name,
+                                 alive=False, error=f"bad zip: {exc}")], hits_sent)
 
         from .scanner import load_cookies_from_path, scan_one_sync
         cookie_files = (
@@ -576,10 +607,10 @@ async def _scan_zip_with_progress(
                 if p.is_file() and p.suffix.lower() in _ALLOWED_EXTS]
         )
         if not cookie_files:
-            return [ScanOutcome(site=site_id, filename=display_name,
-                                alive=False, error="no cookie files in zip")]
+            return ([ScanOutcome(site=site_id, filename=display_name,
+                                 alive=False, error="no cookie files in zip")], hits_sent)
 
-        for fp in cookie_files:
+        for idx, fp in enumerate(cookie_files):
             fname = Path(fp).name
             await _upd(fname)
             # round-robin proxy for each file
@@ -596,14 +627,24 @@ async def _scan_zip_with_progress(
                 plan = _detect_plan_label(site_id, outcome.info or {})
                 if plan: plan_counts[plan] = plan_counts.get(plan, 0) + 1
                 if hit_on:
-                    try: await _send_hit(status_msg, outcome)
-                    except Exception: logger.exception("hit notification failed")
+                    try:
+                        await _send_hit(status_msg, outcome)
+                        # Remember this index so _deliver_outcomes doesn't
+                        # send the same hit a second time.
+                        hits_sent.add(idx)
+                    except Exception:
+                        logger.exception("hit notification failed")
+            elif outcome.error:
+                err_count += 1
             else:
                 dead_count += 1
             await _upd(fname)
+            # Throttle a little so we don't hammer the target API and so
+            # the Telegram dashboard edits stay readable.
+            await asyncio.sleep(config.SCAN_DELAY_SECONDS)
 
     await _upd("")
-    return outcomes
+    return outcomes, hits_sent
 
 
 
@@ -616,29 +657,37 @@ async def _deliver_outcomes(
     context: ContextTypes.DEFAULT_TYPE,
     site_id: str,
     outcomes: list[ScanOutcome],
+    hits_already_sent: set[int] | None = None,
 ) -> None:
     msg  = update.message
     user = update.effective_user
     if msg is None or user is None: return
 
+    if hits_already_sent is None:
+        hits_already_sent = set()
+
     hit_on = await storage.get_hit_notifications(user.id)
 
-    if len(outcomes) > 1:
-        await msg.reply_text(format_summary(outcomes, site_id), parse_mode=ParseMode.HTML)
-
+    # NOTE: we intentionally don't send `format_summary` for multi-file
+    # scans anymore — `format_delivery_summary` (sent below) covers the
+    # same info and was being duplicated. Single-file scans get the
+    # detailed `format_outcome` and that's it.
     show_individual = len(outcomes) <= 20
-    for outcome in outcomes:
+    for idx, outcome in enumerate(outcomes):
         if show_individual:
             await msg.reply_text(
                 format_outcome(outcome), parse_mode=ParseMode.HTML,
                 reply_markup=_back_keyboard() if len(outcomes) == 1 else None,
             )
-        if outcome.alive and hit_on:
+        # Only send the hit document if the zip-scanner didn't already
+        # send it during the live progress phase. Prevents the duplicate
+        # "alive cookie file + hit caption" message users were seeing.
+        if outcome.alive and hit_on and idx not in hits_already_sent:
             await _send_hit(msg, outcome)
 
     if not show_individual:
         await msg.reply_text(
-            f"ℹ️ <b>{len(outcomes)}</b> results — see summary above.",
+            f"ℹ️ <b>{len(outcomes)}</b> results — see summary below.",
             parse_mode=ParseMode.HTML, reply_markup=_back_keyboard())
 
     premium_outcomes = [o for o in outcomes if o.alive and _is_premium(site_id, o)]

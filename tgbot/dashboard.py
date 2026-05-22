@@ -50,6 +50,7 @@ def format_start_dashboard(stats: dict[str, Any]) -> str:
     total = int(stats.get("total", 0) or 0)
     alive = int(stats.get("alive", 0) or 0)
     dead  = int(stats.get("dead",  0) or 0)
+    errd  = int(stats.get("errored", 0) or 0)
     rate  = f"{alive / total * 100:.1f}%" if total > 0 else "—"
     last  = stats.get("last_updated") or "never"
 
@@ -61,6 +62,7 @@ def format_start_dashboard(stats: dict[str, Any]) -> str:
             f"  🧮 Scanned : <b>{total}</b>\n"
             f"  ✅ Alive   : <b>{alive}</b>  ({rate})\n"
             f"  ❌ Dead    : <b>{dead}</b>\n"
+            f"  ⚠️ Errored : <b>{errd}</b>\n"
             f"  🕒 Updated : <code>{_esc(last)}</code>"
         ),
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -75,6 +77,7 @@ def format_start_dashboard(stats: dict[str, Any]) -> str:
         s_total   = int(ss.get("total", 0) or 0)
         s_alive   = int(ss.get("alive", 0) or 0)
         s_dead    = int(ss.get("dead",  0) or 0)
+        s_err     = int(ss.get("errored", 0) or 0)
         intro     = _SITE_INTRO.get(site_id, "")
         label     = f"{site['emoji']} <b>{_esc(site['label'])}</b>"
 
@@ -90,10 +93,11 @@ def format_start_dashboard(stats: dict[str, Any]) -> str:
         s_rate    = f"{s_alive / s_total * 100:.1f}%"
         plan_data = _ordered_plans(site_id, dict(ss.get("plans") or {}))
 
+        err_part  = f" · ⚠️ <b>{s_err}</b> err" if s_err > 0 else ""
         lines.append(
             f"{label}\n"
             f"  <i>{_esc(intro)}</i>\n"
-            f"  [{bar}] ✅ <b>{s_alive}</b> alive · ❌ <b>{s_dead}</b> dead · {s_rate}"
+            f"  [{bar}] ✅ <b>{s_alive}</b> alive · ❌ <b>{s_dead}</b> dead{err_part} · {s_rate}"
         )
 
         if plan_data:
@@ -120,6 +124,8 @@ def format_scan_dashboard(
     dead: int,
     plan_counts: dict[str, int],
     current_file: str = "",
+    errored: int = 0,
+    cpm: float | None = None,
 ) -> str:
     """Live progress dashboard sent/edited while a zip is being checked."""
     emoji   = config.site_emoji(site_id)
@@ -134,6 +140,10 @@ def format_scan_dashboard(
         f"  ✅ Alive    : <b>{alive}</b>",
         f"  ❌ Dead     : <b>{dead}</b>",
     ]
+    if errored > 0:
+        lines.append(f"  ⚠️ Errored  : <b>{errored}</b>")
+    if cpm is not None and cpm > 0:
+        lines.append(f"  ⚡ Speed    : <b>{cpm:.1f}</b> CPM")
 
     if current_file:
         lines.append(f"  📄 Checking : <code>{_esc(current_file)}</code>")
