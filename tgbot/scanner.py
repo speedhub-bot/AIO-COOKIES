@@ -154,6 +154,9 @@ def scan_one_sync(
             elapsed_s=0.0,
         )
 
+    # proxy precedence: explicit arg → DEFAULT_PROXY env var
+    # (storage.get_next_proxy() is async and cannot be called here;
+    #  callers that want round-robin must pass the proxy in explicitly)
     proxy = proxy or (config.DEFAULT_PROXY or None)
 
     if site_id in LEGACY_SITES:
@@ -191,7 +194,20 @@ async def scan_site(
 
     A non-zip input yields exactly one outcome. A ``.zip`` input yields
     one outcome per cookie file discovered inside it.
+
+    Proxy resolution order:
+      1. *proxy* argument (explicit override)
+      2. Round-robin from the admin-managed proxy list in storage
+      3. DEFAULT_PROXY env var
+      4. Direct connection (None)
     """
+    from . import storage as _storage  # local import avoids circular dep
+
+    if proxy is None:
+        proxy = await _storage.get_next_proxy()          # may return None
+    if proxy is None:
+        proxy = config.DEFAULT_PROXY or None
+
     fp = str(file_path)
     display = filename or os.path.basename(fp)
 

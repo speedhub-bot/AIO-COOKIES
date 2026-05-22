@@ -89,6 +89,11 @@ REQUIRED_CHANNEL_INVITE: str = _str(
 # Display name shown on the join button
 CHANNEL_DISPLAY_NAME: str = _str("CHANNEL_DISPLAY_NAME", "AKAZA VIP 👑")
 
+# ── Proxy ─────────────────────────────────────────────────────
+# Flat file where the active proxy list is persisted.
+# Admin can overwrite this at runtime via the bot panel.
+PROXY_FILE: Path = Path(_str("PROXY_FILE", "bot_data/proxies.txt"))
+
 # ── Roles ─────────────────────────────────────────────────────
 ROLE_FREE    = "free"
 ROLE_PREMIUM = "premium"

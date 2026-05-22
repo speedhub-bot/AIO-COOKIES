@@ -441,3 +441,124 @@ async def record_tier_counts(site_id: str, premium: int, free: int) -> None:
         site["premium"] = int(site.get("premium", 0) or 0) + premium
         site["free"]    = int(site.get("free",    0) or 0) + free
         await asyncio.to_thread(_save_dashboard_sync, db)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Proxy management
+#
+#  Proxies are stored as plain text, one per line:
+#    http://host:port
+#    http://user:pass@host:port
+#    socks5://host:port
+#
+#  One proxy is marked "active" (rotated in round-robin by the
+#  scanner).  The full list + active index live in
+#  bot_data/proxies.txt  (one proxy per line) and
+#  bot_data/proxy_index.txt  (single integer, the current index).
+# ═══════════════════════════════════════════════════════════════
+
+_PROXY_LOCK = asyncio.Lock()
+
+
+def _proxy_list_path() -> Path:
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return config.PROXY_FILE
+
+
+def _proxy_index_path() -> Path:
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return config.DATA_DIR / "proxy_index.txt"
+
+
+def _read_proxy_list_sync() -> list[str]:
+    path = _proxy_list_path()
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text("utf-8").splitlines()
+        return [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+    except OSError:
+        return []
+
+
+def _write_proxy_list_sync(proxies: list[str]) -> None:
+    path = _proxy_list_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(proxies) + ("\n" if proxies else ""), encoding="utf-8")
+
+
+def _read_proxy_index_sync() -> int:
+    path = _proxy_index_path()
+    try:
+        return max(0, int(path.read_text("utf-8").strip()))
+    except Exception:
+        return 0
+
+
+def _write_proxy_index_sync(idx: int) -> None:
+    _proxy_index_path().write_text(str(idx), encoding="utf-8")
+
+
+async def get_proxies() -> list[str]:
+    """Return the full proxy list (may be empty)."""
+    async with _PROXY_LOCK:
+        return await asyncio.to_thread(_read_proxy_list_sync)
+
+
+async def get_proxy_count() -> int:
+    return len(await get_proxies())
+
+
+async def set_proxies(proxies: list[str]) -> None:
+    """Replace the entire proxy list and reset the rotation index."""
+    clean = [p.strip() for p in proxies if p.strip() and not p.strip().startswith("#")]
+    async with _PROXY_LOCK:
+        await asyncio.to_thread(_write_proxy_list_sync, clean)
+        await asyncio.to_thread(_write_proxy_index_sync, 0)
+
+
+async def add_proxies(proxies: list[str]) -> int:
+    """Append new proxies (deduped). Returns new total count."""
+    async with _PROXY_LOCK:
+        existing = await asyncio.to_thread(_read_proxy_list_sync)
+        existing_set = set(existing)
+        added = [p.strip() for p in proxies
+                 if p.strip() and not p.strip().startswith("#")
+                 and p.strip() not in existing_set]
+        merged = existing + added
+        await asyncio.to_thread(_write_proxy_list_sync, merged)
+        return len(merged)
+
+
+async def delete_proxy(index: int) -> bool:
+    """Delete proxy at *index* (0-based). Returns True if deleted."""
+    async with _PROXY_LOCK:
+        proxies = await asyncio.to_thread(_read_proxy_list_sync)
+        if index < 0 or index >= len(proxies):
+            return False
+        proxies.pop(index)
+        await asyncio.to_thread(_write_proxy_list_sync, proxies)
+        # reset rotation so we don't land out-of-bounds
+        await asyncio.to_thread(_write_proxy_index_sync, 0)
+        return True
+
+
+async def clear_proxies() -> None:
+    """Remove all proxies."""
+    async with _PROXY_LOCK:
+        await asyncio.to_thread(_write_proxy_list_sync, [])
+        await asyncio.to_thread(_write_proxy_index_sync, 0)
+
+
+async def get_next_proxy() -> str | None:
+    """Round-robin: return the next proxy and advance the index.
+    Returns None if the list is empty (direct connection used)."""
+    async with _PROXY_LOCK:
+        proxies = await asyncio.to_thread(_read_proxy_list_sync)
+        if not proxies:
+            return None
+        idx = await asyncio.to_thread(_read_proxy_index_sync)
+        idx = idx % len(proxies)
+        proxy = proxies[idx]
+        await asyncio.to_thread(_write_proxy_index_sync, (idx + 1) % len(proxies))
+        return proxy
