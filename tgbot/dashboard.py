@@ -9,21 +9,67 @@ from . import config
 from .formatting import BOT_CREDIT
 
 
+# ── Plan ordering per site ───────────────────────────────────
+
 PLAN_ORDER: dict[str, tuple[str, ...]] = {
-    "claude.ai": ("Max", "Team/Enterprise", "Team", "Enterprise", "Pro", "Free", "Unknown"),
-    "chatgpt.com": ("Team", "Pro", "Plus", "Paid", "Free", "Unknown"),
-    "cursor.com": ("Team", "Pro", "Premium", "Free", "Unknown"),
-    "devin.ai": ("Team", "Pro", "Free", "Unknown"),
-    "crunchyroll.com": ("Ultimate Fan", "Mega Fan", "Fan", "Premium", "Free", "Unknown"),
-    "netflix.com": ("Premium", "Standard", "Basic", "Free", "Unknown"),
+    "claude.ai":      ("Max", "Team/Enterprise", "Team", "Enterprise", "Pro", "Free", "Trial", "Unknown"),
+    "chatgpt.com":    ("Team", "Pro", "Plus", "Paid", "Free", "Unknown"),
+    "cursor.com":     ("Team", "Pro", "Premium", "Free", "Unknown"),
+    "devin.ai":       ("Team", "Pro", "Free", "Unknown"),
+    "crunchyroll.com":("Ultimate Fan", "Mega Fan", "Fan", "Premium", "Free", "Unknown"),
+    "netflix.com":    ("Premium", "Standard", "Basic", "Free", "Unknown"),
     "primevideo.com": ("Prime", "Premium", "Free", "Unknown"),
-    "spotify.com": ("Premium", "Family", "Duo", "Student", "Free", "Unknown"),
-    "roblox.com": ("Premium", "Free", "Unknown"),
-    "shopify.com": ("Plus", "Advanced", "Shopify", "Basic", "Free", "Unknown"),
-    "facebook.com": ("Free", "Unknown"),
-    "blackbox.ai": ("Team", "Premium", "Trial", "Free", "Unknown"),
-    "manus.im": ("Max", "Team", "Pro", "Plus", "Premium", "Free", "Unknown"),
-    "perplexity.ai": ("Enterprise", "Team", "Max", "Pro", "Free", "Unknown"),
+    "spotify.com":    ("Premium", "Family", "Duo", "Student", "Free", "Unknown"),
+    "roblox.com":     ("Premium", "Free", "Unknown"),
+    "shopify.com":    ("Plus", "Advanced", "Shopify", "Basic", "Free", "Unknown"),
+    "facebook.com":   ("Free", "Unknown"),
+    "blackbox.ai":    ("Team", "Premium", "Trial", "Free", "Unknown"),
+    "manus.im":       ("Max", "Team", "Pro", "Plus", "Premium", "Free", "Unknown"),
+    "perplexity.ai":  ("Enterprise", "Team", "Max", "Pro", "Free", "Unknown"),
+}
+
+# Emoji badges for plan tiers — keep them tiny so the dashboard is readable
+PLAN_EMOJI: dict[str, str] = {
+    "Max":           "💎",
+    "Ultra":         "💎",
+    "Enterprise":    "🏢",
+    "Team/Enterprise":"🏢",
+    "Team":          "👥",
+    "Pro":           "⭐",
+    "Plus":          "✨",
+    "Paid":          "💳",
+    "Premium":       "🌟",
+    "Prime":         "🎬",
+    "Family":        "👨‍👩‍👧",
+    "Duo":           "👫",
+    "Student":       "🎓",
+    "Ultimate Fan":  "🔥",
+    "Mega Fan":      "🎌",
+    "Fan":           "🎏",
+    "Advanced":      "🚀",
+    "Basic":         "📦",
+    "Shopify":       "🛍️",
+    "Trial":         "⏳",
+    "Free":          "🆓",
+    "Unknown":       "❓",
+}
+
+# Site-level emoji header rows (shown even when 0 checks)
+_SITE_INTRO: dict[str, str] = {
+    "claude.ai":      "AI assistant (Free / Pro / Max / Team)",
+    "chatgpt.com":    "AI assistant (Free / Plus / Pro / Team)",
+    "cursor.com":     "AI code editor (Free / Pro / Team)",
+    "devin.ai":       "AI developer (Free / Pro / Team)",
+    "crunchyroll.com":"Anime streaming (Fan / Mega Fan / Ultimate Fan)",
+    "netflix.com":    "Video streaming (Basic / Standard / Premium)",
+    "primevideo.com": "Video streaming (Free / Prime / Premium)",
+    "spotify.com":    "Music streaming (Free / Premium / Family / Duo / Student)",
+    "roblox.com":     "Gaming platform (Free / Premium)",
+    "shopify.com":    "E-commerce (Basic / Shopify / Advanced / Plus)",
+    "facebook.com":   "Social network",
+    "blackbox.ai":    "AI assistant (Free / Premium / Team)",
+    "manus.im":       "AI agent (Free / Plus / Pro / Max / Team)",
+    "perplexity.ai":  "AI search (Free / Pro / Max / Team / Enterprise)",
 }
 
 
@@ -49,43 +95,120 @@ def _ordered_plans(site_id: str, plans: dict[str, int]) -> list[tuple[str, int]]
     return out
 
 
+def _plan_badge(plan: str, count: int) -> str:
+    emoji = PLAN_EMOJI.get(plan, "🔹")
+    return f"{emoji} {_esc(plan)} <b>{count}</b>"
+
+
+def _bar(alive: int, total: int, width: int = 8) -> str:
+    """Return a tiny Unicode progress bar."""
+    if total == 0:
+        return "░" * width
+    filled = round(alive / total * width)
+    return "█" * filled + "░" * (width - filled)
+
+
 def format_start_dashboard(stats: dict[str, Any]) -> str:
+    """Rich main-menu dashboard with live stats for every supported site."""
     sites = stats.get("sites") if isinstance(stats.get("sites"), dict) else {}
     total = int(stats.get("total", 0) or 0)
     alive = int(stats.get("alive", 0) or 0)
-    dead = int(stats.get("dead", 0) or 0)
+    dead  = int(stats.get("dead",  0) or 0)
+    rate  = f"{alive / total * 100:.1f}%" if total > 0 else "—"
+    last  = stats.get("last_updated") or "never"
 
-    lines = [
-        "🍪 <b>AIO Cookies Bot</b>",
-        "<b>Live dashboard</b> — checks + plan counts per service.",
-        f"🧮 Total: <b>{total}</b> · ✅ Alive: <b>{alive}</b> · ❌ Dead: <b>{dead}</b>",
+    lines: list[str] = [
+        "🍪 <b>AIO Cookies Bot</b>  ·  Live Dashboard",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        (
+            f"📊 <b>All-time totals</b>\n"
+            f"  🧮 Scanned : <b>{total}</b>\n"
+            f"  ✅ Alive   : <b>{alive}</b>  ({rate})\n"
+            f"  ❌ Dead    : <b>{dead}</b>\n"
+            f"  🕒 Updated : <code>{_esc(last)}</code>"
+        ),
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
 
+    # ── Per-site rows ──────────────────────────────────────
     for site in config.SUPPORTED_SITES:
-        site_id = site["id"]
-        site_stats = sites.get(site_id) if isinstance(sites.get(site_id), dict) else {}
-        site_total = int(site_stats.get("total", 0) or 0)
-        site_alive = int(site_stats.get("alive", 0) or 0)
-        site_dead = int(site_stats.get("dead", 0) or 0)
-        label = f"{site['emoji']} <b>{_esc(site['label'])}</b>"
+        site_id   = site["id"]
+        raw       = sites.get(site_id)
+        ss        = raw if isinstance(raw, dict) else {}
+        s_total   = int(ss.get("total", 0) or 0)
+        s_alive   = int(ss.get("alive", 0) or 0)
+        s_dead    = int(ss.get("dead",  0) or 0)
+        intro     = _SITE_INTRO.get(site_id, "")
+        label     = f"{site['emoji']} <b>{_esc(site['label'])}</b>"
 
-        if site_total == 0:
-            lines.append(f"{label} — <code>0 checks</code>")
+        if s_total == 0:
+            lines.append(
+                f"{label}\n"
+                f"  <i>{_esc(intro)}</i>\n"
+                f"  <code>No checks yet</code>\n"
+            )
             continue
 
-        plan_bits = [
-            f"{_esc(plan)} <b>{count}</b>"
-            for plan, count in _ordered_plans(site_id, dict(site_stats.get("plans") or {}))
-        ]
-        plans = " · ".join(plan_bits) if plan_bits else "No alive plans yet"
+        bar       = _bar(s_alive, s_total)
+        s_rate    = f"{s_alive / s_total * 100:.1f}%"
+        plan_data = _ordered_plans(site_id, dict(ss.get("plans") or {}))
+
         lines.append(
-            f"{label} — ✅ <b>{site_alive}</b> / ❌ <b>{site_dead}</b> · {plans}"
+            f"{label}\n"
+            f"  <i>{_esc(intro)}</i>\n"
+            f"  [{bar}] ✅ <b>{s_alive}</b> alive · ❌ <b>{s_dead}</b> dead · {s_rate}"
         )
 
+        if plan_data:
+            badges = "  ".join(_plan_badge(p, c) for p, c in plan_data)
+            lines.append(f"  {badges}")
+
+        lines.append("")
+
     lines.extend([
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "👇 Pick a service — then send your cookie file",
+        "   <code>.json</code> · <code>.txt</code> · <code>.zip</code>",
         "",
-        "Pick a service below, then send cookies as <code>.json</code>, <code>.txt</code>, or <code>.zip</code>.",
         BOT_CREDIT,
     ])
+    return "\n".join(lines)
+
+
+def format_scan_dashboard(
+    site_id: str,
+    done: int,
+    total_files: int,
+    alive: int,
+    dead: int,
+    plan_counts: dict[str, int],
+    current_file: str = "",
+) -> str:
+    """Live progress dashboard sent/edited while a zip is being checked."""
+    emoji   = config.site_emoji(site_id)
+    label   = config.site_label(site_id)
+    pct     = f"{done / total_files * 100:.0f}%" if total_files > 0 else "0%"
+    bar     = _bar(done, total_files, width=10)
+
+    lines: list[str] = [
+        f"{emoji} <b>Scanning {_esc(label)}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"  ⚙️  Progress : [{bar}] <b>{done}/{total_files}</b> ({pct})",
+        f"  ✅ Alive    : <b>{alive}</b>",
+        f"  ❌ Dead     : <b>{dead}</b>",
+    ]
+
+    if current_file:
+        lines.append(f"  📄 Checking : <code>{_esc(current_file)}</code>")
+
+    if plan_counts:
+        ordered = _ordered_plans(site_id, plan_counts)
+        if ordered:
+            lines.append("")
+            lines.append("  <b>Plans found so far:</b>")
+            for plan, count in ordered:
+                lines.append(f"    {_plan_badge(plan, count)}")
+
+    lines.extend(["━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "⏳ <i>Please wait…</i>"])
     return "\n".join(lines)
