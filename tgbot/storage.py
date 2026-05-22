@@ -423,6 +423,7 @@ async def record_scan_outcomes(outcomes: list[Any]) -> None:
             sid   = str(getattr(o, "site", "") or "unknown")
             alive = bool(getattr(o, "alive", False))
             err   = getattr(o, "error", None)
+            is_dead = bool(getattr(o, "is_dead", False))
             site  = db["sites"].setdefault(
                 sid,
                 {"total": 0, "alive": 0, "dead": 0, "errored": 0,
@@ -436,6 +437,13 @@ async def record_scan_outcomes(outcomes: list[Any]) -> None:
                 if plan:
                     plans = site.setdefault("plans", {})
                     plans[plan] = int(plans.get(plan, 0)) + 1
+            elif is_dead:
+                # Adapter explicitly confirmed the cookie is dead
+                # (401 unauthorized, login redirect, expired JWT,
+                # auth cookie missing, etc.). Goes in the "dead"
+                # bucket regardless of whether ``error`` was also
+                # set for diagnostics.
+                db["dead"] += 1; site["dead"] += 1
             elif err:
                 # An exception/HTTP error blocked the check — don't conflate
                 # with a confirmed dead session, account for it separately.

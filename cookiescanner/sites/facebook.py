@@ -67,6 +67,7 @@ class FacebookAdapter(SiteAdapter):
                 "Facebook session requires both c_user + xs cookies; "
                 f"found only {present or 'tracker-only cookies'}."
             )
+            result.is_dead = True
             return result
 
         user_id = cookies["c_user"]
@@ -108,6 +109,7 @@ class FacebookAdapter(SiteAdapter):
                         f"/me/ redirected to {location} (cookie dead "
                         "or 2FA / checkpoint required)"
                     )
+                    result.is_dead = True
                     return result
                 # Anything else — vanity URL, profile.php?id=X, or
                 # the root — counts as a logged-in redirect.
@@ -123,9 +125,12 @@ class FacebookAdapter(SiteAdapter):
                     _absorb_profile_html(r.text, result.info)
                 else:
                     result.error = "/me/ returned 200 but body looks logged-out"
+                    result.is_dead = True
                     return result
             else:
                 result.error = f"/me/ returned HTTP {r.status_code}"
+                if r.status_code in (401, 403):
+                    result.is_dead = True
                 return result
 
             # 2) mbasic profile page — best-effort for name + dob.

