@@ -38,6 +38,16 @@ def _bool(key: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 # ── Telegram credentials ─────────────────────────────────────
 BOT_TOKEN: str = _str("BOT_TOKEN", "")
 
@@ -80,14 +90,22 @@ TEMP_DIR: Path = Path(_str("TEMP_DIR", "/tmp/aiocookies-bot"))
 
 # ── Channel gate ─────────────────────────────────────────────
 # Public username OR numeric id of the channel users must join.
-# e.g.  REQUIRED_CHANNEL=@AkazaVIP  or  REQUIRED_CHANNEL=-1001234567890
-REQUIRED_CHANNEL: str = _str("REQUIRED_CHANNEL", "@AkazaVIP")
+# e.g.  REQUIRED_CHANNEL=@akaza_isnt  or  REQUIRED_CHANNEL=-1001234567890
+# ⚠️  The bot MUST be added to this channel as administrator for the
+#    membership check to work — otherwise every new user will see the
+#    "Access Denied" join prompt and never get past it.
+REQUIRED_CHANNEL: str = _str("REQUIRED_CHANNEL", "@akaza_isnt")
 # Invite link shown to users who haven't joined yet.
 REQUIRED_CHANNEL_INVITE: str = _str(
-    "REQUIRED_CHANNEL_INVITE", "https://t.me/+tEEGOtFNUPU1NTll"
+    "REQUIRED_CHANNEL_INVITE", "https://t.me/akaza_isnt"
 )
 # Display name shown on the join button
-CHANNEL_DISPLAY_NAME: str = _str("CHANNEL_DISPLAY_NAME", "AKAZA VIP 👑")
+CHANNEL_DISPLAY_NAME: str = _str("CHANNEL_DISPLAY_NAME", "@akaza_isnt 👑")
+
+# Sleep (in seconds) between consecutive cookie checks inside a zip
+# scan. Slowing the scan down a touch keeps the bot from flooding
+# target APIs and keeps the live dashboard readable.
+SCAN_DELAY_SECONDS: float = _float("SCAN_DELAY_SECONDS", 0.6)
 
 # ── Proxy ─────────────────────────────────────────────────────
 # Flat file where the active proxy list is persisted.

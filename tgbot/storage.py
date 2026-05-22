@@ -286,11 +286,11 @@ async def get_hit_notifications(user_id: int) -> bool:
 
 def _empty_dashboard() -> dict[str, Any]:
     return {
-        "total": 0, "alive": 0, "dead": 0,
+        "total": 0, "alive": 0, "dead": 0, "errored": 0,
         "last_updated": None,
         "sites": {
             site["id"]: {
-                "total": 0, "alive": 0, "dead": 0,
+                "total": 0, "alive": 0, "dead": 0, "errored": 0,
                 "plans": {}, "premium": 0, "free": 0,
             }
             for site in config.SUPPORTED_SITES
@@ -300,7 +300,7 @@ def _empty_dashboard() -> dict[str, Any]:
 
 def _normalise_dashboard(data: dict[str, Any]) -> dict[str, Any]:
     db = _empty_dashboard()
-    for k in ("total", "alive", "dead"):
+    for k in ("total", "alive", "dead", "errored"):
         try:
             db[k] = int(data.get(k, 0) or 0)
         except (TypeError, ValueError):
@@ -312,9 +312,10 @@ def _normalise_dashboard(data: dict[str, Any]) -> dict[str, Any]:
             continue
         site = db["sites"].setdefault(
             str(sid),
-            {"total": 0, "alive": 0, "dead": 0, "plans": {}, "premium": 0, "free": 0},
+            {"total": 0, "alive": 0, "dead": 0, "errored": 0,
+             "plans": {}, "premium": 0, "free": 0},
         )
-        for k in ("total", "alive", "dead", "premium", "free"):
+        for k in ("total", "alive", "dead", "errored", "premium", "free"):
             try:
                 site[k] = int(raw.get(k, 0) or 0)
             except (TypeError, ValueError):
@@ -372,6 +373,24 @@ def plan_label(site_id: str, info: dict[str, Any], alive: bool) -> str | None:
         if info.get("is_pro") is False or info.get("is_premium") is False:
             return "Free"
         return "Unknown"
+
+    # ── Site-specific overrides ──────────────────────────────
+    # Crunchyroll: SKU codes like `crunchyroll.fanpack.monthly` need
+    # to map to friendly tier names BEFORE the generic substring matcher
+    # runs (otherwise `fanpack` gets caught by the bare `pack`/`fan` rules
+    # and ends up labelled as "Fan" even when it's a Mega/Ultimate sub).
+    if site_id == "crunchyroll.com":
+        sku = str(info.get("plan_sku") or "").lower()
+        haystack = f"{lowered} {sku}"
+        if "ultimate" in haystack:
+            return "Ultimate Fan"
+        if "megafan" in haystack or "mega fan" in haystack:
+            return "Mega Fan"
+        if "fanpack" in haystack or lowered == "fan" or "fan pack" in haystack or "fan" in haystack:
+            return "Fan"
+        if "premium" in haystack:
+            return "Premium"
+
     for needle, label in (
         ("team/enterprise", "Team/Enterprise"), ("enterprise", "Enterprise"),
         ("team", "Team"), ("max", "Max"), ("ultra", "Max"), ("plus", "Plus"),
@@ -403,9 +422,10 @@ async def record_scan_outcomes(outcomes: list[Any]) -> None:
         for o in outcomes:
             sid   = str(getattr(o, "site", "") or "unknown")
             alive = bool(getattr(o, "alive", False))
+            err   = getattr(o, "error", None)
             site  = db["sites"].setdefault(
                 sid,
-                {"total": 0, "alive": 0, "dead": 0,
+                {"total": 0, "alive": 0, "dead": 0, "errored": 0,
                  "plans": {}, "premium": 0, "free": 0},
             )
             db["total"]  += 1; site["total"] += 1
@@ -416,6 +436,11 @@ async def record_scan_outcomes(outcomes: list[Any]) -> None:
                 if plan:
                     plans = site.setdefault("plans", {})
                     plans[plan] = int(plans.get(plan, 0)) + 1
+            elif err:
+                # An exception/HTTP error blocked the check — don't conflate
+                # with a confirmed dead session, account for it separately.
+                db["errored"] = int(db.get("errored", 0)) + 1
+                site["errored"] = int(site.get("errored", 0)) + 1
             else:
                 db["dead"]   += 1; site["dead"]  += 1
         db["last_updated"] = datetime.now(UTC).isoformat(timespec="seconds")
