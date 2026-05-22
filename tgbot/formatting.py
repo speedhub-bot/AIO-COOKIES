@@ -8,16 +8,12 @@ from typing import Any
 
 from . import config
 from .scanner import ScanOutcome
-from .dashboard import PLAN_EMOJI, PLAN_ORDER, _ordered_plans
-
+from .constants import BOT_CREDIT, PLAN_EMOJI, PLAN_ORDER, _ordered_plans
 
 # Per-message length budget. Telegram's hard cap is 4096; we stop a
 # little early so we can safely append truncation notes.
 MAX_MESSAGE_LEN = 3800
 MAX_VALUE_LEN = 400
-
-# Credit line appended to every bot reply so users know who built it.
-BOT_CREDIT = '🤖 Bot by <a href="https://t.me/akaza_isnt">@akaza_isnt</a>'
 
 
 def _esc(value: Any) -> str:

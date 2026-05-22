@@ -6,53 +6,7 @@ import html
 from typing import Any
 
 from . import config
-from .formatting import BOT_CREDIT
-
-
-# ── Plan ordering per site ───────────────────────────────────
-
-PLAN_ORDER: dict[str, tuple[str, ...]] = {
-    "claude.ai":      ("Max", "Team/Enterprise", "Team", "Enterprise", "Pro", "Free", "Trial", "Unknown"),
-    "chatgpt.com":    ("Team", "Pro", "Plus", "Paid", "Free", "Unknown"),
-    "cursor.com":     ("Team", "Pro", "Premium", "Free", "Unknown"),
-    "devin.ai":       ("Team", "Pro", "Free", "Unknown"),
-    "crunchyroll.com":("Ultimate Fan", "Mega Fan", "Fan", "Premium", "Free", "Unknown"),
-    "netflix.com":    ("Premium", "Standard", "Basic", "Free", "Unknown"),
-    "primevideo.com": ("Prime", "Premium", "Free", "Unknown"),
-    "spotify.com":    ("Premium", "Family", "Duo", "Student", "Free", "Unknown"),
-    "roblox.com":     ("Premium", "Free", "Unknown"),
-    "shopify.com":    ("Plus", "Advanced", "Shopify", "Basic", "Free", "Unknown"),
-    "facebook.com":   ("Free", "Unknown"),
-    "blackbox.ai":    ("Team", "Premium", "Trial", "Free", "Unknown"),
-    "manus.im":       ("Max", "Team", "Pro", "Plus", "Premium", "Free", "Unknown"),
-    "perplexity.ai":  ("Enterprise", "Team", "Max", "Pro", "Free", "Unknown"),
-}
-
-# Emoji badges for plan tiers — keep them tiny so the dashboard is readable
-PLAN_EMOJI: dict[str, str] = {
-    "Max":           "💎",
-    "Ultra":         "💎",
-    "Enterprise":    "🏢",
-    "Team/Enterprise":"🏢",
-    "Team":          "👥",
-    "Pro":           "⭐",
-    "Plus":          "✨",
-    "Paid":          "💳",
-    "Premium":       "🌟",
-    "Prime":         "🎬",
-    "Family":        "👨‍👩‍👧",
-    "Duo":           "👫",
-    "Student":       "🎓",
-    "Ultimate Fan":  "🔥",
-    "Mega Fan":      "🎌",
-    "Fan":           "🎏",
-    "Advanced":      "🚀",
-    "Basic":         "📦",
-    "Shopify":       "🛍️",
-    "Trial":         "⏳",
-    "Free":          "🆓",
-    "Unknown":       "❓",
-}
+from .constants import BOT_CREDIT, PLAN_EMOJI, PLAN_ORDER, _ordered_plans
 
 # Site-level emoji header rows (shown even when 0 checks)
 _SITE_INTRO: dict[str, str] = {
@@ -75,24 +29,6 @@ _SITE_INTRO: dict[str, str] = {
 
 def _esc(value: Any) -> str:
     return html.escape(str(value), quote=False)
-
-
-def _ordered_plans(site_id: str, plans: dict[str, int]) -> list[tuple[str, int]]:
-    order = PLAN_ORDER.get(site_id, ("Max", "Team", "Pro", "Plus", "Premium", "Free", "Unknown"))
-    out: list[tuple[str, int]] = []
-    seen: set[str] = set()
-    for label in order:
-        count = int(plans.get(label, 0) or 0)
-        if count > 0:
-            out.append((label, count))
-            seen.add(label)
-    for label in sorted(plans):
-        if label in seen:
-            continue
-        count = int(plans.get(label, 0) or 0)
-        if count > 0:
-            out.append((label, count))
-    return out
 
 
 def _plan_badge(plan: str, count: int) -> str:
