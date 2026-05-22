@@ -696,17 +696,42 @@ def _mask_proxy(proxy: str) -> str:
 
 
 def _parse_proxy_text(text: str) -> list[str]:
-    """Extract valid proxy strings from free-form text."""
+    """Extract valid proxy strings from free-form text.
+
+    Accepted formats (one per line):
+      http://host:port
+      http://user:pass@host:port
+      socks5://host:port
+      host:port                        → treated as http://host:port
+      host:port:user:pass              → http://user:pass@host:port
+      user:pass@host:port              → http://user:pass@host:port
+    """
     lines = []
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        # accept bare host:port as http://
+
+        # already has a scheme — use as-is
         if line.startswith(("http://", "https://", "socks5://", "socks4://")):
             lines.append(line)
-        elif ":" in line and not line.startswith("//"):
+            continue
+
+        # user:pass@host:port  (no scheme)
+        if "@" in line:
             lines.append("http://" + line)
+            continue
+
+        parts = line.split(":")
+        if len(parts) == 4:
+            # host:port:user:pass  ← your format
+            host, port, user, passwd = parts
+            lines.append(f"http://{user}:{passwd}@{host}:{port}")
+        elif len(parts) == 2:
+            # host:port
+            lines.append("http://" + line)
+        # anything else we skip silently
+
     return lines
 
 
