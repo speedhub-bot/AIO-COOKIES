@@ -56,14 +56,31 @@ async def _post_init(app: Application) -> None:
     try:
         await app.bot.set_my_commands(
             [
-                BotCommand("start", "Open the site picker"),
-                BotCommand("check", "Check cookies for a site"),
-                BotCommand("sites", "List supported sites"),
-                BotCommand("settings", "Toggle hit notifications"),
-                BotCommand("help", "How to use the bot"),
-                BotCommand("about", "About this bot"),
+                BotCommand("start",     "Dashboard + site picker"),
+                BotCommand("check",     "Check cookies for a site"),
+                BotCommand("profile",   "Your profile, role & stats"),
+                BotCommand("settings",  "Toggle hit notifications"),
+                BotCommand("sites",     "List supported sites"),
+                BotCommand("help",      "How to use the bot"),
+                BotCommand("about",     "About this bot"),
             ]
         )
+        # Admin-only commands (shown only to ADMIN_ID via scope)
+        from telegram import BotCommandScopeChat
+        from . import config as _cfg
+        if _cfg.ADMIN_ID:
+            await app.bot.set_my_commands(
+                [
+                    BotCommand("admin",     "Admin panel"),
+                    BotCommand("give",      "Give role: /give <id> premium|free|admin"),
+                    BotCommand("ban",       "Ban a user: /ban <id> [reason]"),
+                    BotCommand("unban",     "Unban a user: /unban <id>"),
+                    BotCommand("userinfo",  "User details: /userinfo <id>"),
+                    BotCommand("users",     "List all users"),
+                    BotCommand("broadcast", "Broadcast a message"),
+                ],
+                scope=BotCommandScopeChat(chat_id=_cfg.ADMIN_ID),
+            )
     except Exception:  # noqa: BLE001
         logger.exception("Failed to register slash-command menu")
     logger.info("Bot initialised \u2014 polling for updates")

@@ -78,6 +78,22 @@ LOG_FILE: str = _str("LOG_FILE", "bot.log")
 TEMP_DIR: Path = Path(_str("TEMP_DIR", "/tmp/aiocookies-bot"))
 
 
+# ── Channel gate ─────────────────────────────────────────────
+# Public username OR numeric id of the channel users must join.
+# e.g.  REQUIRED_CHANNEL=@AkazaVIP  or  REQUIRED_CHANNEL=-1001234567890
+REQUIRED_CHANNEL: str = _str("REQUIRED_CHANNEL", "@AkazaVIP")
+# Invite link shown to users who haven't joined yet.
+REQUIRED_CHANNEL_INVITE: str = _str(
+    "REQUIRED_CHANNEL_INVITE", "https://t.me/+tEEGOtFNUPU1NTll"
+)
+# Display name shown on the join button
+CHANNEL_DISPLAY_NAME: str = _str("CHANNEL_DISPLAY_NAME", "AKAZA VIP 👑")
+
+# ── Roles ─────────────────────────────────────────────────────
+ROLE_FREE    = "free"
+ROLE_PREMIUM = "premium"
+ROLE_ADMIN   = "admin"
+
 # ── Hit notification defaults ────────────────────────────────
 # Default ON/OFF state for hit notifications when a user first opens
 # the bot. Per-user override lives in ``bot_data/settings.json``.
