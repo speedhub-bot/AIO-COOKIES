@@ -572,8 +572,10 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer("🗑 All proxies cleared.", show_alert=False)
         await _show_proxy_panel(update, context, 0); return
 
-
+    # ── adm_user:premium|free|admin|ban|unban:<uid> ───────────
+    if data.startswith("adm_user:") and not data.startswith("adm_user:view"):
         parts = data.split(":")
+        if len(parts) < 3: return
         action, uid = parts[1], int(parts[2])
         if action in (config.ROLE_FREE, config.ROLE_PREMIUM, config.ROLE_ADMIN):
             u = await storage.set_user_role(uid, action)
