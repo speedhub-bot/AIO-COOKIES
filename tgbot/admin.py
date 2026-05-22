@@ -43,8 +43,9 @@ from .constants import BOT_CREDIT
 
 
 # ── Conversation states ───────────────────────────────────────
-BROADCAST_TEXT = 1
+BROADCAST_TEXT    = 1
 BROADCAST_CONFIRM = 2
+PROXY_PASTE       = 3
 
 # ── Helpers ───────────────────────────────────────────────────
 
@@ -88,6 +89,9 @@ def _admin_main_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("📢 Broadcast",        callback_data="adm:broadcast"),
             InlineKeyboardButton("🔍 Find User",        callback_data="adm:find"),
+        ],
+        [
+            InlineKeyboardButton("🌐 Proxy Manager",    callback_data="adm:proxy"),
         ],
         [InlineKeyboardButton("❌ Close",               callback_data="adm:close")],
     ])
@@ -519,8 +523,56 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except BadRequest: pass
         return
 
-    # ── adm_user:premium|free|admin:<uid> ────────────────────
-    if data.startswith("adm_user:") and not data.startswith("adm_user:view"):
+    # ── adm:proxy (main panel) ────────────────────────────────
+    if data == "adm:proxy":
+        await _show_proxy_panel(update, context, 0); return
+
+    # ── adm:proxy:list:<page> ─────────────────────────────────
+    if data.startswith("adm:proxy:list:"):
+        page = int(data.split(":")[-1])
+        await _show_proxy_panel(update, context, page); return
+
+    # ── adm:proxy:paste (enter conversation via button) ───────
+    if data == "adm:proxy:paste":
+        await cmd_proxy_paste_start(update, context); return
+
+    # ── adm:proxy:upload ──────────────────────────────────────
+    if data == "adm:proxy:upload":
+        if context.user_data is not None:
+            context.user_data["proxy_upload_mode"] = True
+        try:
+            await q.edit_message_text(
+                "📄 <b>Upload Proxy File</b>\n\n"
+                "Send me a <code>.txt</code> file — one proxy per line.\n"
+                "Accepted: <code>http://host:port</code>, "
+                "<code>socks5://host:port</code>, <code>user:pass@host:port</code>\n\n"
+                "Or tap Cancel to go back.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data="adm:proxy"),
+                ]]),
+            )
+        except BadRequest:
+            pass
+        return
+
+    # ── adm:proxy:del:<idx> ────────────────────────────────────
+    if data.startswith("adm:proxy:del:"):
+        idx = int(data.split(":")[-1])
+        deleted = await storage.delete_proxy(idx)
+        if deleted:
+            await q.answer("🗑 Deleted.", show_alert=False)
+        else:
+            await q.answer("⚠️ Index out of range.", show_alert=True)
+        await _show_proxy_panel(update, context, 0); return
+
+    # ── adm:proxy:clear ───────────────────────────────────────
+    if data == "adm:proxy:clear":
+        await storage.clear_proxies()
+        await q.answer("🗑 All proxies cleared.", show_alert=False)
+        await _show_proxy_panel(update, context, 0); return
+
+
         parts = data.split(":")
         action, uid = parts[1], int(parts[2])
         if action in (config.ROLE_FREE, config.ROLE_PREMIUM, config.ROLE_ADMIN):
@@ -562,6 +614,244 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 
+# ═══════════════════════════════════════════════════════════════
+#  Proxy Manager
+# ═══════════════════════════════════════════════════════════════
+
+_PROXY_PAGE_SIZE = 10
+
+
+def _proxy_main_keyboard(total: int, page: int = 0) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("➕ Paste proxies",   callback_data="adm:proxy:paste"),
+            InlineKeyboardButton("📄 Upload .txt",     callback_data="adm:proxy:upload"),
+        ],
+        [
+            InlineKeyboardButton("🗑 Clear all",        callback_data="adm:proxy:clear"),
+            InlineKeyboardButton("🔄 Refresh",          callback_data="adm:proxy"),
+        ],
+    ]
+    # pagination nav
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"adm:proxy:list:{page-1}"))
+    if (page + 1) * _PROXY_PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"adm:proxy:list:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ Admin Panel", callback_data="adm:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _fmt_proxy_panel(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    """Return (text, keyboard) for the proxy management panel."""
+    proxies = await storage.get_proxies()
+    total   = len(proxies)
+    start   = page * _PROXY_PAGE_SIZE
+    chunk   = proxies[start : start + _PROXY_PAGE_SIZE]
+
+    lines = [
+        "🌐 <b>Proxy Manager</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"  📋 Total proxies : <b>{total}</b>",
+        f"  🔄 Rotation      : round-robin (per-scan)",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if not proxies:
+        lines.append("\n  <i>No proxies loaded — direct connections are used.</i>")
+    else:
+        lines.append(f"\n  <b>Proxies (page {page+1}/{max(1,(total-1)//_PROXY_PAGE_SIZE+1)}):</b>")
+        for i, px in enumerate(chunk, start=start):
+            # mask password in display: http://user:****@host:port
+            display = _mask_proxy(px)
+            lines.append(f"    <code>{i}</code>. {_esc(display)}")
+
+    lines += [
+        "",
+        "  <b>Add proxies:</b>  one per line, formats accepted:",
+        "    <code>http://host:port</code>",
+        "    <code>http://user:pass@host:port</code>",
+        "    <code>socks5://host:port</code>",
+    ]
+
+    kb = _proxy_main_keyboard(total, page)
+    return "\n".join(lines), kb
+
+
+def _mask_proxy(proxy: str) -> str:
+    """Hide password in display: http://user:****@host:port"""
+    try:
+        if "@" in proxy:
+            scheme_user, hostpart = proxy.rsplit("@", 1)
+            if ":" in scheme_user.split("//", 1)[-1]:
+                scheme, userpass = scheme_user.split("//", 1)
+                user, _ = userpass.split(":", 1)
+                return f"{scheme}//{user}:****@{hostpart}"
+    except Exception:
+        pass
+    return proxy
+
+
+def _parse_proxy_text(text: str) -> list[str]:
+    """Extract valid proxy strings from free-form text."""
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # accept bare host:port as http://
+        if line.startswith(("http://", "https://", "socks5://", "socks4://")):
+            lines.append(line)
+        elif ":" in line and not line.startswith("//"):
+            lines.append("http://" + line)
+    return lines
+
+
+# ── Proxy: show panel ─────────────────────────────────────────
+
+async def _show_proxy_panel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    page: int = 0,
+) -> None:
+    text, kb = await _fmt_proxy_panel(page)
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except BadRequest:
+            pass
+    elif update.message:
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+
+
+# ── Proxy: paste conversation ─────────────────────────────────
+
+@_admin_only
+async def cmd_proxy_paste_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Entry point for the paste-proxies conversation."""
+    text = (
+        "🌐 <b>Add Proxies — Paste</b>\n\n"
+        "Send a message with proxies, one per line.\n"
+        "Accepted formats:\n"
+        "  <code>http://host:port</code>\n"
+        "  <code>http://user:pass@host:port</code>\n"
+        "  <code>socks5://host:port</code>\n"
+        "  <code>host:port</code>  (treated as http://)\n\n"
+        "Or send /cancel to abort."
+    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            text, parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="adm:proxy"),
+            ]]),
+        )
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    return PROXY_PASTE
+
+
+async def proxy_paste_receive(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Receive pasted proxy text, add to list, show result."""
+    msg = update.message
+    if msg is None:
+        return PROXY_PASTE
+    raw_text = msg.text or ""
+    proxies  = _parse_proxy_text(raw_text)
+    if not proxies:
+        await msg.reply_text(
+            "❌ No valid proxies found. Try again or /cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+        return PROXY_PASTE
+    new_total = await storage.add_proxies(proxies)
+    await msg.reply_text(
+        f"✅ Added <b>{len(proxies)}</b> proxy(ies).\n"
+        f"📋 Total in list: <b>{new_total}</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🌐 Back to Proxy Manager", callback_data="adm:proxy"),
+        ]]),
+    )
+    return ConversationHandler.END
+
+
+async def proxy_paste_cancel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if update.message:
+        await update.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+
+# ── Proxy: upload .txt file ───────────────────────────────────
+
+async def proxy_upload_receive(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Handle an uploaded .txt proxy file from admin."""
+    import tempfile as _tmp, os as _os
+    msg = update.message
+    if msg is None or msg.document is None:
+        return
+    user = update.effective_user
+    if user is None or not _is_admin(user.id):
+        return
+
+    doc = msg.document
+    if doc.file_size and doc.file_size > 2 * 1024 * 1024:   # 2 MB cap
+        await msg.reply_text("❌ File too large (max 2 MB).")
+        return
+
+    # check if we're in the upload-mode context flag
+    if not (context.user_data or {}).get("proxy_upload_mode"):
+        return   # not in proxy-upload mode, ignore
+
+    context.user_data["proxy_upload_mode"] = False
+
+    status = await msg.reply_text("⏳ Reading proxy file…")
+    config.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    with _tmp.NamedTemporaryFile(delete=False, suffix=".txt",
+                                 dir=str(config.TEMP_DIR)) as tf:
+        tmp_path = tf.name
+    try:
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(tmp_path)
+        raw = open(tmp_path, encoding="utf-8", errors="ignore").read()
+        proxies = _parse_proxy_text(raw)
+        if not proxies:
+            await status.edit_text("❌ No valid proxies found in file.")
+            return
+        new_total = await storage.add_proxies(proxies)
+        await status.edit_text(
+            f"✅ Loaded <b>{len(proxies)}</b> proxy(ies) from file.\n"
+            f"📋 Total in list: <b>{new_total}</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🌐 Proxy Manager", callback_data="adm:proxy"),
+            ]]),
+        )
+    except Exception as exc:
+        await status.edit_text(f"❌ Error reading file: {_esc(str(exc))}")
+    finally:
+        try:
+            _os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 # ── Registration ──────────────────────────────────────────────
 
 def register(app: Application) -> None:
@@ -579,6 +869,19 @@ def register(app: Application) -> None:
         per_chat=True,
     )
 
+    # Proxy paste conversation
+    proxy_paste_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("proxies", cmd_proxy_paste_start),
+        ],
+        states={
+            PROXY_PASTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, proxy_paste_receive)],
+        },
+        fallbacks=[CommandHandler("cancel", proxy_paste_cancel)],
+        per_user=True,
+        per_chat=True,
+    )
+
     app.add_handler(CommandHandler("admin",    cmd_admin))
     app.add_handler(CommandHandler("give",     cmd_give))
     app.add_handler(CommandHandler("ban",      cmd_ban))
@@ -586,4 +889,10 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("users",    cmd_users))
     app.add_handler(broadcast_conv)
+    app.add_handler(proxy_paste_conv)
+    # document upload for proxy .txt files (admin only, flagged via user_data)
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("txt") & filters.ChatType.PRIVATE,
+        proxy_upload_receive,
+    ))
     app.add_handler(CallbackQueryHandler(cb_admin, pattern=r"^adm[_:]"))

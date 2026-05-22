@@ -582,9 +582,11 @@ async def _scan_zip_with_progress(
         for fp in cookie_files:
             fname = Path(fp).name
             await _upd(fname)
+            # round-robin proxy for each file
+            proxy = await storage.get_next_proxy() or config.DEFAULT_PROXY or None
             try:
                 cookies = await asyncio.to_thread(load_cookies_from_path, fp)
-                outcome = await asyncio.to_thread(scan_one_sync, site_id, cookies, fname, None)
+                outcome = await asyncio.to_thread(scan_one_sync, site_id, cookies, fname, proxy)
             except Exception as exc:
                 outcome = ScanOutcome(site=site_id, filename=fname,
                                       alive=False, error=f"error: {exc}")

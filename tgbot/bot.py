@@ -78,6 +78,7 @@ async def _post_init(app: Application) -> None:
                     BotCommand("userinfo",  "User details: /userinfo <id>"),
                     BotCommand("users",     "List all users"),
                     BotCommand("broadcast", "Broadcast a message"),
+                    BotCommand("proxies",   "Proxy manager"),
                 ],
                 scope=BotCommandScopeChat(chat_id=_cfg.ADMIN_ID),
             )
