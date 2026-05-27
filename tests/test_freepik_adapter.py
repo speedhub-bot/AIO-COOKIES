@@ -404,6 +404,29 @@ def test_scan_populates_jwt_claims_on_environmental_block(monkeypatch) -> None:
     assert info["email_verified"] is True
 
 
+def test_scan_429_rate_limit_does_not_mark_dead(monkeypatch) -> None:
+    """429 is environmental (rate limit), not a dead-cookie verdict."""
+    token = _make_jwt({"sub": "u", "exp": int(time.time()) + 3600})
+    jar = _jar_with(token)
+    adapter = FreepikAdapter(jar)
+
+    fake = _FakeClient({
+        "https://www.freepik.com/api/profile/v2/me": _FakeResponse(
+            status_code=429, text="", headers={"content-type": "text/plain"}),
+        "https://www.freepik.com/api/profile/me": _FakeResponse(
+            status_code=429, text="", headers={"content-type": "text/plain"}),
+        "https://www.freepik.com/api/regular/users/v1/me": _FakeResponse(
+            status_code=429, text="", headers={"content-type": "text/plain"}),
+    })
+    monkeypatch.setattr(adapter, "make_client", lambda **kw: fake)
+
+    result = adapter.scan()
+    assert result.alive is False
+    # 429 = rate limited != dead cookie. The user can retry.
+    assert result.is_dead is False
+    assert "429" in (result.error or "")
+
+
 def test_absorb_jwt_claims_classifies_free_premium_team() -> None:
     """Plan-hint derivation from JWT scopes."""
     out: dict[str, Any] = {}

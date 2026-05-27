@@ -171,6 +171,15 @@ class FreepikAdapter(SiteAdapter):
                 if r.status_code >= 500:
                     last_error = f"{path} returned HTTP {r.status_code}"
                     continue
+                if r.status_code == 429:
+                    # Rate-limiting is environmental, not an auth verdict;
+                    # don't flip transient_only so the cookie stays out
+                    # of the DEAD bucket if every endpoint 429s.
+                    last_error = (
+                        f"{path} returned HTTP 429 (rate-limited); "
+                        "try again later or behind a different IP."
+                    )
+                    continue
                 if r.status_code != 200:
                     transient_only = False
                     last_error = f"{path} returned HTTP {r.status_code}"
