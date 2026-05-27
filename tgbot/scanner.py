@@ -55,6 +55,7 @@ CS_SITES: set[str] = {
     "roblox.com",
     "shopify.com",
     "facebook.com",
+    "freepik.com",
 }
 
 

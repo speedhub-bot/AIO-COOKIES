@@ -54,12 +54,16 @@ def _detect_plan_label(site_id: str, info: dict[str, Any]) -> str | None:
             return "Team"
         if "max" in low or "ultra" in low:
             return "Max"
+        if "premium+" in low or "premium plus" in low or "premiumplus" in low:
+            return "Premium+"
         if "plus" in low:
             return "Plus"
         if "prime" in low:
             return "Prime"
         if "premium" in low:
             return "Premium"
+        if "education" in low or low == "edu":
+            return "Education"
         if "pro" in low or "paid" in low or low == "active":
             return "Pro"
         if "trial" in low:
@@ -128,6 +132,8 @@ def format_outcome(outcome: ScanOutcome) -> str:
             "email", "name", "username",
             "plan", "plan_name", "subscription_tier", "payment_tier",
             "is_pro", "is_premium",
+            "credits", "credits_total", "credits_used",
+            "downloads_left", "downloads_quota",
             "id", "user_id",
             "subscription_status", "membership_status",
             "renewal", "renewal_date", "renewal_timestamp",
@@ -266,13 +272,38 @@ def format_hit(outcome: ScanOutcome) -> str:
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"  📧 Email   : <code>{_esc(_truncate(str(email), 200))}</code>",
         f"  {pe} Plan    : <code>{_esc(_truncate(str(plan), 200))}</code>",
+    ]
+
+    # Credits / quota — surfaced for any site that exposes them (Freepik
+    # primarily, but the field set is generic so future sites pick this
+    # up for free).
+    credits_line = _credits_line(info)
+    if credits_line:
+        lines.append(credits_line)
+
+    lines.extend([
         f"  📅 Renewal : <code>{_esc(_truncate(str(renewal), 200))}</code>",
         f"  📎 File    : <i>{_esc(outcome.filename)}</i>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
         BOT_CREDIT,
-    ]
+    ])
     return "\n".join(lines)
+
+
+def _credits_line(info: dict[str, Any]) -> str | None:
+    """Build a HIT-card credits line, e.g.  💰 Credits : 142 / 200"""
+    credits = info.get("credits")
+    if credits is None:
+        credits = info.get("downloads_left")
+    if credits is None:
+        return None
+    total = info.get("credits_total") or info.get("downloads_quota")
+    if total is not None:
+        body = f"{credits} / {total}"
+    else:
+        body = str(credits)
+    return f"  💰 Credits : <code>{_esc(_truncate(body, 200))}</code>"
 
 
 # ── Final delivery summary (sent at very end) ──────────────────────────────────

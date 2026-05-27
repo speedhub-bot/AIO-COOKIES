@@ -29,6 +29,7 @@ PLAN_ORDER: dict[str, tuple[str, ...]] = {
     "blackbox.ai":     ("Team", "Premium", "Trial", "Free", "Unknown"),
     "manus.im":        ("Max", "Team", "Pro", "Plus", "Premium", "Free", "Unknown"),
     "perplexity.ai":   ("Enterprise", "Team", "Max", "Pro", "Free", "Unknown"),
+    "freepik.com":     ("Premium+", "Premium", "Team", "Education", "Trial", "Free", "Unknown"),
 }
 
 
@@ -43,7 +44,9 @@ PLAN_EMOJI: dict[str, str] = {
     "Pro":            "⭐",
     "Plus":           "✨",
     "Paid":           "💳",
+    "Premium+":       "💎",
     "Premium":        "🌟",
+    "Education":      "🎓",
     "Prime":          "🎬",
     "Family":         "👨‍👩‍👧",
     "Duo":            "👫",

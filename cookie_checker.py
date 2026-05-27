@@ -213,6 +213,12 @@ def detect_site(cookies: list[dict], filename: str = "") -> str | None:
     if any("blackbox.ai" in d for d in domains) or "blackbox" in fname:
         return "blackbox.ai"
 
+    # Freepik — GR_TOKEN is the JWT auth cookie on .freepik.com.
+    if any("freepik.com" in d for d in domains) or "freepik" in fname:
+        return "freepik.com"
+    if "GR_TOKEN" in names:
+        return "freepik.com"
+
     return None
 
 
@@ -457,7 +463,35 @@ def _request_json(
     if requests_resp.get("status") == 200:
         return requests_resp
 
-    # Both failed — prefer the cffi response (richer status info)
+    # Both failed. Before giving up retry the cffi path once on
+    # *transient* failures (network errors, 5xx, or a Cloudflare
+    # challenge on the first hit). curl_cffi flakes on a cold session
+    # often enough that a single retry catches a sizeable chunk of what
+    # otherwise lands in the "errored" bucket on the dashboard.
+    def _looks_transient(resp: dict | None) -> bool:
+        if not resp:
+            return False
+        status = resp.get("status", 0)
+        if status == 0:
+            return True
+        if status >= 500:
+            return True
+        if status == 429:
+            return True
+        if status == 403 and _looks_like_cf_challenge(resp.get("text") or ""):
+            return True
+        return False
+
+    if _looks_transient(cffi_resp) or _looks_transient(requests_resp):
+        retry = _via_cffi()
+        if retry and retry.get("status") == 200:
+            return retry
+        # Prefer the retry response if it's "more authoritative"
+        # (a real 401/403/200) than the first attempts.
+        if retry and retry.get("status") in (200, 401, 403, 404):
+            return retry
+
+    # All attempts failed — prefer the cffi response (richer status info)
     # but fall back to the requests one if cffi was unavailable.
     return cffi_resp or requests_resp
 
@@ -1042,9 +1076,25 @@ def check_crunchyroll(cookies: list[dict], proxy: str | None = None) -> dict:
                     pass
 
                 # Subscription info
+                #
+                # Pick the first of (external_id, account_id) that is a real
+                # UUID-shaped value. The legacy ``a or b`` expression here
+                # returned the sentinel string ``"N/A"`` whenever the
+                # ``/accounts/v1/me`` call hadn't surfaced an external_id
+                # (which is also stored as ``"N/A"``) — and ``"N/A"`` is
+                # truthy, so the fallback to ``account_id`` never fired.
+                # The subscription products endpoint was then skipped and
+                # the dashboard ended up showing every alive Crunchyroll
+                # cookie under "Unknown" plan.
                 try:
-                    account_id = result["info"].get("external_id") or result["info"].get("account_id")
-                    if account_id and account_id != "N/A":
+                    raw_ext = result["info"].get("external_id")
+                    raw_acc = result["info"].get("account_id")
+                    account_id = None
+                    for candidate in (raw_ext, raw_acc):
+                        if candidate and candidate != "N/A":
+                            account_id = candidate
+                            break
+                    if account_id:
                         r4 = _safe_get(s, f"https://beta-api.crunchyroll.com/subs/v3/subscriptions/{account_id}/products", auth_headers)
                         if r4.status_code == 200:
                             subs = r4.json()
