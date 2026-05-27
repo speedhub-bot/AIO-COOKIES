@@ -20,9 +20,11 @@ from cookiescanner.cookies import Cookie, CookieJar
 from cookiescanner.sites.freepik import (
     FreepikAdapter,
     _absorb_credits,
+    _absorb_jwt_claims,
     _absorb_profile,
     _decode_jwt_payload,
     _finalise,
+    _looks_like_akamai_challenge,
     _looks_like_cf_challenge,
     _looks_like_user,
 )
@@ -307,6 +309,118 @@ def test_scan_cloudflare_challenge_falls_through_then_errors(monkeypatch) -> Non
     # still be valid behind a proper residential proxy.
     assert result.is_dead is False
     assert "cloudflare" in (result.error or "").lower()
+
+
+def test_looks_like_akamai_challenge_detects_bm_verify() -> None:
+    """Freepik fronts /api/* with Akamai BotManager; the challenge is a
+    200 + HTML with a ``bm-verify`` meta-refresh redirect. The adapter
+    must distinguish this from a real auth verdict."""
+    body = (
+        '<!DOCTYPE html><html><head><meta http-equiv="refresh" '
+        "content=\"5; URL='/api/profile/v2/me?bm-verify=AAQAAAAN_xxx'\" />"
+        "</head><body></body></html>"
+    )
+    assert _looks_like_akamai_challenge(body) is True
+    assert _looks_like_akamai_challenge("") is False
+    assert _looks_like_akamai_challenge("normal json response") is False
+
+
+def test_scan_akamai_challenge_falls_through_without_marking_dead(monkeypatch) -> None:
+    """Akamai-only failures must NOT be classified as a dead cookie;
+    they signal an environmental block (untrusted IP)."""
+    token = _make_jwt({"sub": "u", "exp": int(time.time()) + 3600})
+    jar = _jar_with(token)
+    adapter = FreepikAdapter(jar)
+
+    bm_body = (
+        '<!DOCTYPE html><html><head><meta http-equiv="refresh" '
+        "content=\"5; URL='/api/profile/v2/me?bm-verify=AAQ_xxx'\"/>"
+        "</head></html>"
+    )
+    fake = _FakeClient({
+        "https://www.freepik.com/api/profile/v2/me": _FakeResponse(
+            status_code=200, text=bm_body,
+            headers={"content-type": "text/html"},
+        ),
+        "https://www.freepik.com/api/profile/me": _FakeResponse(
+            status_code=200, text=bm_body,
+            headers={"content-type": "text/html"},
+        ),
+        "https://www.freepik.com/api/regular/users/v1/me": _FakeResponse(
+            status_code=200, text=bm_body,
+            headers={"content-type": "text/html"},
+        ),
+    })
+    monkeypatch.setattr(adapter, "make_client", lambda **kw: fake)
+
+    result = adapter.scan()
+    assert result.alive is False
+    # Critical: bot-challenge != dead cookie; the user may retry behind
+    # a residential proxy and have the same cookie come back ALIVE.
+    assert result.is_dead is False
+    assert "akamai" in (result.error or "").lower()
+
+
+def test_scan_populates_jwt_claims_on_environmental_block(monkeypatch) -> None:
+    """Even when every endpoint is bot-challenged, the JWT-derived info
+    should still land in ``result.info`` so the HIT card (or a retry
+    behind a proxy) has the email/name/plan-hint already extracted."""
+    token = _make_jwt({
+        "sub": "40cee198d7bc4c8ab3cb388e2edcaee0",
+        "email": "fotosartdesign@gmail.com",
+        "name": "user5967936",
+        "picture": "https://lh3.googleusercontent.com/pic.jpg",
+        "accounts_user_id": 5967936,
+        "scopes": "freepik/images freepik/videos flaticon/png flaticon/svg",
+        "team_id": None,
+        "firebase": {"sign_in_provider": "custom",
+                     "identities": {"google.com": ["1146"]}},
+        "email_verified": True,
+        "exp": int(time.time()) + 3600,
+    })
+    jar = _jar_with(token)
+    adapter = FreepikAdapter(jar)
+
+    bm_body = '<html>bm-verify_xxx</html>'
+    fake = _FakeClient({
+        "https://www.freepik.com/api/profile/v2/me": _FakeResponse(
+            status_code=200, text=bm_body, headers={"content-type": "text/html"}),
+        "https://www.freepik.com/api/profile/me": _FakeResponse(
+            status_code=200, text=bm_body, headers={"content-type": "text/html"}),
+        "https://www.freepik.com/api/regular/users/v1/me": _FakeResponse(
+            status_code=200, text=bm_body, headers={"content-type": "text/html"}),
+    })
+    monkeypatch.setattr(adapter, "make_client", lambda **kw: fake)
+
+    result = adapter.scan()
+    assert result.alive is False
+    assert result.is_dead is False
+    info = result.info
+    assert info["email"] == "fotosartdesign@gmail.com"
+    assert info["username"] == "user5967936"
+    assert info["accounts_user_id"] == 5967936
+    assert info["plan_hint"] == "Premium"
+    assert info["sign_in_provider"] == "google"
+    assert info["email_verified"] is True
+
+
+def test_absorb_jwt_claims_classifies_free_premium_team() -> None:
+    """Plan-hint derivation from JWT scopes."""
+    out: dict[str, Any] = {}
+    _absorb_jwt_claims({"raw": {"scopes": "freepik/images"}}, out)
+    assert out["plan_hint"] == "Free"
+
+    out2: dict[str, Any] = {}
+    _absorb_jwt_claims(
+        {"raw": {"scopes": "freepik/images freepik/videos flaticon/png"}},
+        out2,
+    )
+    assert out2["plan_hint"] == "Premium"
+
+    out3: dict[str, Any] = {}
+    _absorb_jwt_claims({"raw": {"team_id": "team_42", "scopes": "freepik/images"}}, out3)
+    assert out3["plan_hint"] == "Team"
+    assert out3["team_id"] == "team_42"
 
 
 def test_scan_falls_back_to_dedicated_credits_endpoint(monkeypatch) -> None:

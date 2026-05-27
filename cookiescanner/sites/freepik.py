@@ -103,6 +103,14 @@ class FreepikAdapter(SiteAdapter):
                 result.is_dead = True
                 return result
 
+        # Pre-populate the result from the JWT claims so a Cloudflare /
+        # Akamai block still produces a useful HIT card. ``jwt_info`` was
+        # already used for the early dead-on-expiry verdict above; here
+        # we absorb the rest of the rich claims (name, plan, scopes,
+        # picture, etc.) that Freepik bakes into the token.
+        if jwt_info:
+            _absorb_jwt_claims(jwt_info, result.info)
+
         headers = self.common_headers()
         # Some Freepik endpoints require the Authorization header even
         # when GR_TOKEN is present in the cookie jar; send both.
@@ -111,19 +119,29 @@ class FreepikAdapter(SiteAdapter):
         with self.make_client(extra_headers=headers) as http:
             profile_payload: dict[str, Any] | None = None
             last_error: str | None = None
-            cf_or_5xx_only = True
+            transient_only = True
             for path in self.PROFILE_ENDPOINTS:
                 url = self.BASE_URL + path
                 r = http.get(url)
                 result.endpoints_tried.append(
                     {"url": url, "status": r.status_code, "len": len(r.text)}
                 )
+                text = r.text or ""
+                # Akamai BotManager hides behind 200 + HTML challenge
+                # body. Detect *before* the 401/403 branch because BM
+                # also sometimes returns 200/403/429 with the same body.
+                if _looks_like_akamai_challenge(text):
+                    last_error = (
+                        f"{path} returned an Akamai BotManager challenge "
+                        f"(HTTP {r.status_code}); IP not trusted, use a "
+                        "residential proxy to bypass."
+                    )
+                    continue
                 if r.status_code in (401, 403):
-                    text = r.text or ""
                     if _looks_like_cf_challenge(text):
                         last_error = (
                             f"{path} returned a Cloudflare challenge "
-                            f"(403); IP not trusted, use a residential proxy."
+                            f"({r.status_code}); IP not trusted, use a residential proxy."
                         )
                         continue
                     # Real 401/403 — Freepik refused the token.
@@ -154,10 +172,10 @@ class FreepikAdapter(SiteAdapter):
                     last_error = f"{path} returned HTTP {r.status_code}"
                     continue
                 if r.status_code != 200:
-                    cf_or_5xx_only = False
+                    transient_only = False
                     last_error = f"{path} returned HTTP {r.status_code}"
                     continue
-                cf_or_5xx_only = False
+                transient_only = False
                 payload = self.try_json(r)
                 if isinstance(payload, dict) and _looks_like_user(payload):
                     profile_payload = payload
@@ -165,10 +183,14 @@ class FreepikAdapter(SiteAdapter):
                 last_error = f"{path} returned 200 with no user payload"
 
             if profile_payload is None:
-                # Differentiate transient (CF / 5xx) from authoritative
-                # "no user data anywhere" — the latter is a dead cookie.
+                # Two failure modes here:
+                #  - environmental (Akamai/CF/5xx/network): cookie may still be
+                #    alive; surface the JWT-derived info so the HIT card still
+                #    shows something useful when the user retries through a
+                #    residential proxy.
+                #  - authoritative (200 with non-user JSON / 4xx): dead cookie.
                 result.error = last_error or "no profile endpoint succeeded"
-                if not cf_or_5xx_only:
+                if not transient_only:
                     result.is_dead = True
                 return result
 
@@ -185,6 +207,9 @@ class FreepikAdapter(SiteAdapter):
                         {"url": url, "status": r.status_code, "len": len(r.text)}
                     )
                     if r.status_code != 200:
+                        continue
+                    text = r.text or ""
+                    if _looks_like_akamai_challenge(text):
                         continue
                     payload = self.try_json(r)
                     if isinstance(payload, dict):
@@ -207,9 +232,28 @@ _CF_MARKERS = (
     "cf-mitigated",
 )
 
+# Freepik is fronted by Akamai BotManager, NOT Cloudflare. The challenge
+# response is a 200 with an HTML body containing ``bm-verify`` markers
+# and an ``http-equiv="refresh"`` redirect back to the same URL. Without
+# this detection the adapter would see ``200 + non-JSON body`` and
+# misclassify a perfectly valid cookie as "errored".
+_AKAMAI_BM_MARKERS = (
+    "bm-verify",
+    "_bm/get_params",
+    "_bm/_data",
+    "akam/13/",
+    "Akamai BotManager",
+)
+
 
 def _looks_like_cf_challenge(text: str) -> bool:
     return any(m in text for m in _CF_MARKERS)
+
+
+def _looks_like_akamai_challenge(text: str) -> bool:
+    if not text:
+        return False
+    return any(m in text for m in _AKAMAI_BM_MARKERS)
 
 
 def _looks_like_user(payload: dict[str, Any]) -> bool:
@@ -231,7 +275,15 @@ def _looks_like_user(payload: dict[str, Any]) -> bool:
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
-    """Best-effort decode of the JWT payload segment for early checks."""
+    """Best-effort decode of the JWT payload segment.
+
+    Freepik bakes a *lot* into ``GR_TOKEN`` — email, accounts_user_id,
+    name, picture, team_id, scopes, sign-in provider, firebase identity
+    map. We return the whole decoded payload (in ``raw``) plus a few
+    normalised top-level keys (``user_id``, ``email``, ``exp``,
+    ``exp_iso``, ``expired``) so callers can do quick checks without
+    re-implementing the JWT base64 dance.
+    """
     import time
     from datetime import datetime, timezone
 
@@ -247,7 +299,7 @@ def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict):
         return None
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {"raw": data}
     exp = data.get("exp")
     if isinstance(exp, (int, float)):
         try:
@@ -270,6 +322,60 @@ def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
     if data.get("email"):
         out["email"] = data["email"]
     return out
+
+
+def _absorb_jwt_claims(jwt_info: dict[str, Any], info: dict[str, Any]) -> None:
+    """Lift Freepik-specific JWT claims into the HIT-card info dict.
+
+    The ``GR_TOKEN`` JWT issued by Freepik's Firebase project
+    (``fc-profile-pro-rev1``) carries enough identifying data to render
+    a full HIT card even when the HTTP probe is blocked by Akamai —
+    name, picture, accounts_user_id, scopes, team_id, sign-in provider.
+    Falling back to this info means a user retrying the scan behind a
+    residential proxy still gets "good capture" instead of a generic
+    "errored" entry.
+    """
+    raw = jwt_info.get("raw")
+    if not isinstance(raw, dict):
+        return
+
+    # accounts_user_id is the Freepik-internal numeric user id; prefer
+    # it over the firebase uid hash because the dashboard groups by it.
+    aid = raw.get("accounts_user_id")
+    if aid is not None:
+        info.setdefault("accounts_user_id", aid)
+    if raw.get("name"):
+        info.setdefault("username", raw["name"])
+    if raw.get("picture"):
+        info.setdefault("avatar", raw["picture"])
+    scopes = raw.get("scopes")
+    if isinstance(scopes, str) and scopes:
+        info.setdefault("scopes", scopes)
+        # Quick plan inference from the scopes string. A free user has
+        # only freepik/images; premium accounts pick up videos/icons.
+        sl = scopes.lower()
+        if "team" in sl or raw.get("team_id"):
+            info.setdefault("plan_hint", "Team")
+        elif "freepik/videos" in sl or "flaticon" in sl:
+            info.setdefault("plan_hint", "Premium")
+        else:
+            info.setdefault("plan_hint", "Free")
+    if raw.get("team_id"):
+        info.setdefault("team_id", raw["team_id"])
+    provider = None
+    fb = raw.get("firebase")
+    if isinstance(fb, dict):
+        provider = fb.get("sign_in_provider")
+        ids = fb.get("identities")
+        if isinstance(ids, dict):
+            for k in ("google.com", "apple.com", "facebook.com"):
+                if ids.get(k):
+                    provider = k.split(".")[0]
+                    break
+    if provider:
+        info.setdefault("sign_in_provider", provider)
+    if raw.get("email_verified") is not None:
+        info.setdefault("email_verified", bool(raw["email_verified"]))
 
 
 _PROFILE_FIELD_MAP: dict[str, tuple[str, ...]] = {
