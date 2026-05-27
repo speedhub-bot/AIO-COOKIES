@@ -213,6 +213,12 @@ def detect_site(cookies: list[dict], filename: str = "") -> str | None:
     if any("blackbox.ai" in d for d in domains) or "blackbox" in fname:
         return "blackbox.ai"
 
+    # Freepik — GR_TOKEN is the JWT auth cookie on .freepik.com.
+    if any("freepik.com" in d for d in domains) or "freepik" in fname:
+        return "freepik.com"
+    if "GR_TOKEN" in names:
+        return "freepik.com"
+
     return None
 
 
@@ -457,7 +463,44 @@ def _request_json(
     if requests_resp.get("status") == 200:
         return requests_resp
 
-    # Both failed — prefer the cffi response (richer status info)
+    # Both failed. Before giving up retry the cffi path once on
+    # *transient* failures (network errors, 5xx, or a Cloudflare
+    # challenge on the first hit). curl_cffi flakes on a cold session
+    # often enough that a single retry catches a sizeable chunk of what
+    # otherwise lands in the "errored" bucket on the dashboard.
+    def _looks_transient(resp: dict | None) -> bool:
+        if not resp:
+            return False
+        status = resp.get("status", 0)
+        if status == 0:
+            return True
+        if status >= 500:
+            return True
+        if status == 429:
+            return True
+        if status == 403 and _looks_like_cf_challenge(resp.get("text") or ""):
+            return True
+        return False
+
+    if _looks_transient(cffi_resp) or _looks_transient(requests_resp):
+        retry = _via_cffi()
+        if retry and retry.get("status") == 200:
+            return retry
+        # Prefer the retry response if it's "more authoritative"
+        # (a real 401/403/200) than the first attempts.
+        if retry and retry.get("status") in (200, 401, 403, 404):
+            return retry
+        # If only one of the two original attempts was transient, the
+        # other one is an authoritative dead-cookie verdict (401/403/404)
+        # and must win over the transient sibling — otherwise we'd let a
+        # cffi Cloudflare-challenge mask a real ``requests`` 401 and
+        # bucket a dead cookie under "errored".
+        if requests_resp and not _looks_transient(requests_resp):
+            return requests_resp
+        if cffi_resp and not _looks_transient(cffi_resp):
+            return cffi_resp
+
+    # All attempts failed — prefer the cffi response (richer status info)
     # but fall back to the requests one if cffi was unavailable.
     return cffi_resp or requests_resp
 
@@ -1042,9 +1085,25 @@ def check_crunchyroll(cookies: list[dict], proxy: str | None = None) -> dict:
                     pass
 
                 # Subscription info
+                #
+                # Pick the first of (external_id, account_id) that is a real
+                # UUID-shaped value. The legacy ``a or b`` expression here
+                # returned the sentinel string ``"N/A"`` whenever the
+                # ``/accounts/v1/me`` call hadn't surfaced an external_id
+                # (which is also stored as ``"N/A"``) — and ``"N/A"`` is
+                # truthy, so the fallback to ``account_id`` never fired.
+                # The subscription products endpoint was then skipped and
+                # the dashboard ended up showing every alive Crunchyroll
+                # cookie under "Unknown" plan.
                 try:
-                    account_id = result["info"].get("external_id") or result["info"].get("account_id")
-                    if account_id and account_id != "N/A":
+                    raw_ext = result["info"].get("external_id")
+                    raw_acc = result["info"].get("account_id")
+                    account_id = None
+                    for candidate in (raw_ext, raw_acc):
+                        if candidate and candidate != "N/A":
+                            account_id = candidate
+                            break
+                    if account_id:
                         r4 = _safe_get(s, f"https://beta-api.crunchyroll.com/subs/v3/subscriptions/{account_id}/products", auth_headers)
                         if r4.status_code == 200:
                             subs = r4.json()
@@ -1113,6 +1172,43 @@ def check_crunchyroll(cookies: list[dict], proxy: str | None = None) -> dict:
     return result
 
 
+def check_freepik(cookies: list[dict], proxy: str | None = None) -> dict:
+    """Bridge from the legacy CLI to the cookiescanner ``FreepikAdapter``.
+
+    The bot path uses ``tgbot.scanner._scan_cookiescanner`` directly, but
+    the standalone ``cookie_checker.py`` CLI dispatches via this
+    ``CHECKERS`` dict — so without an entry here, ``detect_site()``
+    advertising ``freepik.com`` would deterministically dead-end on
+    ``"no checker for freepik.com"`` for every Freepik file scanned from
+    the command line. We translate the legacy cookie-dict format into a
+    ``CookieJar``, run the adapter, and re-shape its ``ScanResult`` into
+    the legacy ``{alive, is_dead, info, error}`` envelope.
+    """
+    # Imported lazily so importing cookie_checker stays free of the
+    # cookiescanner package's curl_cffi import cost when the CLI isn't
+    # actually exercising Freepik.
+    from cookiescanner.cookies import Cookie, CookieJar
+    from cookiescanner.sites.freepik import FreepikAdapter
+
+    jar_entries: list[Cookie] = []
+    for c in cookies:
+        name = c.get("name")
+        value = c.get("value")
+        domain = c.get("domain") or ""
+        if not name or value is None:
+            continue
+        jar_entries.append(Cookie(name=name, value=str(value), domain=str(domain)))
+
+    adapter = FreepikAdapter(CookieJar(jar_entries), proxy=proxy)
+    scan_result = adapter.scan()
+    return {
+        "alive": bool(scan_result.alive),
+        "is_dead": bool(scan_result.is_dead),
+        "info": scan_result.info or {},
+        "error": scan_result.error,
+    }
+
+
 # ─── Checker Registry ────────────────────────────────────────────────────────
 CHECKERS = {
     "claude.ai": check_claude,
@@ -1120,6 +1216,7 @@ CHECKERS = {
     "cursor.com": check_cursor,
     "devin.ai": check_devin,
     "crunchyroll.com": check_crunchyroll,
+    "freepik.com": check_freepik,
 }
 
 

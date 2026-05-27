@@ -102,10 +102,12 @@ REQUIRED_CHANNEL_INVITE: str = _str(
 # Display name shown on the join button
 CHANNEL_DISPLAY_NAME: str = _str("CHANNEL_DISPLAY_NAME", "@akazacheck 👑")
 
-# Sleep (in seconds) between consecutive cookie checks inside a zip
-# scan. Slowing the scan down a touch keeps the bot from flooding
-# target APIs and keeps the live dashboard readable.
-SCAN_DELAY_SECONDS: float = _float("SCAN_DELAY_SECONDS", 0.6)
+# Per-task sleep (in seconds) inserted *after* each cookie check
+# completes inside a parallel zip scan. The scan is fan-out with up to
+# ``MAX_THREADS`` concurrent workers, so the previous 0.6 s default
+# bottlenecked CPM to ~100/min regardless of thread count. Set to 0
+# by default; bump only if you start tripping per-IP rate limits.
+SCAN_DELAY_SECONDS: float = _float("SCAN_DELAY_SECONDS", 0.0)
 
 # ── Proxy ─────────────────────────────────────────────────────
 # Flat file where the active proxy list is persisted.
@@ -141,6 +143,7 @@ SUPPORTED_SITES: list[dict[str, str]] = [
     {"id": "blackbox.ai",     "label": "Blackbox",        "emoji": "\u2b1b\ufe0f"},  # ⬛️
     {"id": "manus.im",        "label": "Manus",           "emoji": "\U0001f9e0"},  # 🧠
     {"id": "perplexity.ai",   "label": "Perplexity",      "emoji": "\U0001f50d"},  # 🔍
+    {"id": "freepik.com",     "label": "Freepik",         "emoji": "\U0001f3a8"},  # 🎨
 ]
 
 SUPPORTED_SITE_IDS: set[str] = {s["id"] for s in SUPPORTED_SITES}

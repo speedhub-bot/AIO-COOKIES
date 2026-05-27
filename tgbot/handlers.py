@@ -610,38 +610,70 @@ async def _scan_zip_with_progress(
             return ([ScanOutcome(site=site_id, filename=display_name,
                                  alive=False, error="no cookie files in zip")], hits_sent)
 
-        for idx, fp in enumerate(cookie_files):
+        # Parallel scan: ``MAX_THREADS`` workers via an asyncio semaphore.
+        # The synchronous scanner runs in the thread executor (via
+        # ``asyncio.to_thread``) so curl_cffi requests truly run in parallel
+        # instead of blocking the event loop. Order-of-completion is
+        # what the dashboard shows; ``hits_sent`` tracks completion-order
+        # indices so ``_deliver_outcomes`` can skip files already sent.
+        sem = asyncio.Semaphore(max(1, int(config.MAX_THREADS)))
+        post_lock = asyncio.Lock()
+        counters = {"alive": 0, "dead": 0, "err": 0}
+
+        async def _process(fp: str) -> None:
             fname = Path(fp).name
-            await _upd(fname)
-            # round-robin proxy for each file
             proxy = await storage.get_next_proxy() or config.DEFAULT_PROXY or None
-            try:
-                cookies = await asyncio.to_thread(load_cookies_from_path, fp)
-                outcome = await asyncio.to_thread(scan_one_sync, site_id, cookies, fname, proxy)
-            except Exception as exc:
-                outcome = ScanOutcome(site=site_id, filename=fname,
-                                      alive=False, error=f"error: {exc}")
-            outcomes.append(outcome)
-            if outcome.alive:
-                alive_count += 1
-                plan = _detect_plan_label(site_id, outcome.info or {})
-                if plan: plan_counts[plan] = plan_counts.get(plan, 0) + 1
-                if hit_on:
+            async with sem:
+                try:
+                    cookies = await asyncio.to_thread(load_cookies_from_path, fp)
+                    outcome = await asyncio.to_thread(
+                        scan_one_sync, site_id, cookies, fname, proxy
+                    )
+                except Exception as exc:
+                    outcome = ScanOutcome(
+                        site=site_id, filename=fname,
+                        alive=False, error=f"error: {exc}",
+                    )
+                # Hold the worker slot through the throttle so
+                # ``SCAN_DELAY_SECONDS`` actually spaces *scan starts*
+                # under parallel load. Sleeping after the slot is
+                # released would let the next file fire immediately and
+                # turn the throttle into a no-op.
+                if config.SCAN_DELAY_SECONDS > 0:
+                    await asyncio.sleep(config.SCAN_DELAY_SECONDS)
+
+            async with post_lock:
+                completion_idx = len(outcomes)
+                outcomes.append(outcome)
+                if outcome.alive:
+                    counters["alive"] += 1
+                    plan = _detect_plan_label(site_id, outcome.info or {})
+                    if plan:
+                        plan_counts[plan] = plan_counts.get(plan, 0) + 1
+                elif outcome.is_dead:
+                    counters["dead"] += 1
+                elif outcome.error:
+                    counters["err"] += 1
+                else:
+                    counters["dead"] += 1
+
+                # Mirror back into the closure-captured names the dashboard
+                # interpolates. Python late-binding means these reads pick
+                # up the latest counters on every _upd().
+                nonlocal alive_count, dead_count, err_count
+                alive_count = counters["alive"]
+                dead_count = counters["dead"]
+                err_count = counters["err"]
+
+                if outcome.alive and hit_on:
                     try:
                         await _send_hit(status_msg, outcome)
-                        # Remember this index so _deliver_outcomes doesn't
-                        # send the same hit a second time.
-                        hits_sent.add(idx)
+                        hits_sent.add(completion_idx)
                     except Exception:
                         logger.exception("hit notification failed")
-            elif outcome.error:
-                err_count += 1
-            else:
-                dead_count += 1
-            await _upd(fname)
-            # Throttle a little so we don't hammer the target API and so
-            # the Telegram dashboard edits stay readable.
-            await asyncio.sleep(config.SCAN_DELAY_SECONDS)
+                await _upd(fname)
+
+        await asyncio.gather(*(_process(fp) for fp in cookie_files))
 
     await _upd("")
     return outcomes, hits_sent
