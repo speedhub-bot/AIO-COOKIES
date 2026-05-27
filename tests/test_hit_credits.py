@@ -46,6 +46,18 @@ def test_hit_includes_credits_without_total() -> None:
     assert "<code>5</code>" in body
 
 
+def test_hit_renders_zero_total_explicitly() -> None:
+    """A legitimate ``credits_total=0`` must NOT be swallowed by ``or``."""
+    body = formatting.format_hit(_outcome({
+        "email": "a@b.com",
+        "plan": "Free",
+        "credits": 0,
+        "credits_total": 0,
+    }))
+    assert "💰 Credits" in body
+    assert "0 / 0" in body
+
+
 def test_hit_falls_back_to_downloads_left() -> None:
     body = formatting.format_hit(_outcome({
         "email": "a@b.com",

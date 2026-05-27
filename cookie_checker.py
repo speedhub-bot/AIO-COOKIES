@@ -490,6 +490,15 @@ def _request_json(
         # (a real 401/403/200) than the first attempts.
         if retry and retry.get("status") in (200, 401, 403, 404):
             return retry
+        # If only one of the two original attempts was transient, the
+        # other one is an authoritative dead-cookie verdict (401/403/404)
+        # and must win over the transient sibling — otherwise we'd let a
+        # cffi Cloudflare-challenge mask a real ``requests`` 401 and
+        # bucket a dead cookie under "errored".
+        if requests_resp and not _looks_transient(requests_resp):
+            return requests_resp
+        if cffi_resp and not _looks_transient(cffi_resp):
+            return cffi_resp
 
     # All attempts failed — prefer the cffi response (richer status info)
     # but fall back to the requests one if cffi was unavailable.
@@ -1163,6 +1172,43 @@ def check_crunchyroll(cookies: list[dict], proxy: str | None = None) -> dict:
     return result
 
 
+def check_freepik(cookies: list[dict], proxy: str | None = None) -> dict:
+    """Bridge from the legacy CLI to the cookiescanner ``FreepikAdapter``.
+
+    The bot path uses ``tgbot.scanner._scan_cookiescanner`` directly, but
+    the standalone ``cookie_checker.py`` CLI dispatches via this
+    ``CHECKERS`` dict — so without an entry here, ``detect_site()``
+    advertising ``freepik.com`` would deterministically dead-end on
+    ``"no checker for freepik.com"`` for every Freepik file scanned from
+    the command line. We translate the legacy cookie-dict format into a
+    ``CookieJar``, run the adapter, and re-shape its ``ScanResult`` into
+    the legacy ``{alive, is_dead, info, error}`` envelope.
+    """
+    # Imported lazily so importing cookie_checker stays free of the
+    # cookiescanner package's curl_cffi import cost when the CLI isn't
+    # actually exercising Freepik.
+    from cookiescanner.cookies import Cookie, CookieJar
+    from cookiescanner.sites.freepik import FreepikAdapter
+
+    jar_entries: list[Cookie] = []
+    for c in cookies:
+        name = c.get("name")
+        value = c.get("value")
+        domain = c.get("domain") or ""
+        if not name or value is None:
+            continue
+        jar_entries.append(Cookie(name=name, value=str(value), domain=str(domain)))
+
+    adapter = FreepikAdapter(CookieJar(jar_entries), proxy=proxy)
+    scan_result = adapter.scan()
+    return {
+        "alive": bool(scan_result.alive),
+        "is_dead": bool(scan_result.is_dead),
+        "info": scan_result.info or {},
+        "error": scan_result.error,
+    }
+
+
 # ─── Checker Registry ────────────────────────────────────────────────────────
 CHECKERS = {
     "claude.ai": check_claude,
@@ -1170,6 +1216,7 @@ CHECKERS = {
     "cursor.com": check_cursor,
     "devin.ai": check_devin,
     "crunchyroll.com": check_crunchyroll,
+    "freepik.com": check_freepik,
 }
 
 

@@ -250,9 +250,19 @@ def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
     out: dict[str, Any] = {}
     exp = data.get("exp")
     if isinstance(exp, (int, float)):
-        out["exp"] = int(exp)
-        out["exp_iso"] = datetime.fromtimestamp(int(exp), tz=timezone.utc).isoformat()
-        out["expired"] = time.time() > int(exp)
+        try:
+            exp_i = int(exp)
+            out["exp_iso"] = datetime.fromtimestamp(exp_i, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            # ``exp`` came from an untrusted JWT — out-of-range values
+            # (e.g. year > 9999 on Windows, < 1970 on some libcs) raise
+            # rather than returning. Treat them as "no exp claim" so
+            # ``scan()`` still attempts the HTTP probe instead of
+            # aborting on a non-conformant token.
+            pass
+        else:
+            out["exp"] = exp_i
+            out["expired"] = time.time() > exp_i
     for k in ("user_id", "userId", "uid", "sub"):
         if data.get(k):
             out["user_id"] = str(data[k])

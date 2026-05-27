@@ -298,7 +298,12 @@ def _credits_line(info: dict[str, Any]) -> str | None:
         credits = info.get("downloads_left")
     if credits is None:
         return None
-    total = info.get("credits_total") or info.get("downloads_quota")
+    # Use explicit None checks so a legitimate ``credits_total=0`` (e.g.
+    # an account whose quota was reduced to zero) renders as ``X / 0``
+    # instead of being silently swallowed by ``or``.
+    total = info.get("credits_total")
+    if total is None:
+        total = info.get("downloads_quota")
     if total is not None:
         body = f"{credits} / {total}"
     else:

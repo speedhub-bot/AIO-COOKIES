@@ -107,6 +107,21 @@ def test_decode_jwt_payload_handles_garbage() -> None:
     assert _decode_jwt_payload("not.a.jwt.payload") is None
 
 
+def test_decode_jwt_payload_tolerates_out_of_range_exp() -> None:
+    """An absurd `exp` (e.g. year 9999+) must not abort scan() — just
+    skip the exp keys so the HTTP probe still runs."""
+    huge = 10**14  # well past datetime's range on most libcs
+    token = _make_jwt({"sub": "u", "exp": huge})
+    info = _decode_jwt_payload(token)
+    assert info is not None
+    # exp keys are absent because the value couldn't be parsed.
+    assert "exp" not in info
+    assert "exp_iso" not in info
+    assert "expired" not in info
+    # But the rest of the payload still came through.
+    assert info["user_id"] == "u"
+
+
 def test_looks_like_user_accepts_top_level_and_nested() -> None:
     assert _looks_like_user({"email": "x@y.com"})
     assert _looks_like_user({"data": {"id": 42}})
@@ -370,3 +385,27 @@ def test_freepik_detect_site_from_domain() -> None:
 
     cookies = [{"domain": ".freepik.com", "name": "foo", "value": "x"}]
     assert cookie_checker.detect_site(cookies, "anon.txt") == "freepik.com"
+
+
+def test_freepik_checker_registered_in_legacy_dispatch() -> None:
+    """``CHECKERS["freepik.com"]`` must exist so the standalone CLI
+    doesn't dead-end on "no checker for freepik.com" once
+    ``detect_site()`` starts returning the new site."""
+    import cookie_checker
+
+    assert "freepik.com" in cookie_checker.CHECKERS
+    assert callable(cookie_checker.CHECKERS["freepik.com"])
+
+
+def test_check_freepik_bridges_to_cookiescanner_adapter() -> None:
+    """The legacy ``check_freepik`` envelope mirrors ScanResult fields."""
+    import cookie_checker
+
+    # Missing GR_TOKEN → adapter sets is_dead and an error string;
+    # the legacy envelope should mirror that without any HTTP traffic.
+    legacy_cookies = [{"domain": ".freepik.com", "name": "junk", "value": "x"}]
+    result = cookie_checker.check_freepik(legacy_cookies)
+    assert result["alive"] is False
+    assert result["is_dead"] is True
+    assert "GR_TOKEN" in (result["error"] or "")
+    assert isinstance(result["info"], dict)

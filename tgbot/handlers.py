@@ -634,6 +634,13 @@ async def _scan_zip_with_progress(
                         site=site_id, filename=fname,
                         alive=False, error=f"error: {exc}",
                     )
+                # Hold the worker slot through the throttle so
+                # ``SCAN_DELAY_SECONDS`` actually spaces *scan starts*
+                # under parallel load. Sleeping after the slot is
+                # released would let the next file fire immediately and
+                # turn the throttle into a no-op.
+                if config.SCAN_DELAY_SECONDS > 0:
+                    await asyncio.sleep(config.SCAN_DELAY_SECONDS)
 
             async with post_lock:
                 completion_idx = len(outcomes)
@@ -665,9 +672,6 @@ async def _scan_zip_with_progress(
                     except Exception:
                         logger.exception("hit notification failed")
                 await _upd(fname)
-
-            if config.SCAN_DELAY_SECONDS > 0:
-                await asyncio.sleep(config.SCAN_DELAY_SECONDS)
 
         await asyncio.gather(*(_process(fp) for fp in cookie_files))
 
