@@ -39,8 +39,13 @@ def _truncate(text: str, limit: int = MAX_VALUE_LEN) -> str:
 
 def _detect_plan_label(site_id: str, info: dict[str, Any]) -> str | None:
     """Pull the best human-readable plan label from an alive account's info."""
+    # ``plan_hint`` is the JWT-derived fallback used by sites whose live
+    # profile endpoint may be bot-challenged (Freepik / Akamai). It only
+    # kicks in last in the search order so a real API-reported plan is
+    # still preferred when available.
     for key in ("plan_name", "plan", "subscription_tier", "payment_tier",
-                "membership_status", "tier", "subscription_status"):
+                "membership_status", "tier", "subscription_status",
+                "plan_hint"):
         raw = info.get(key)
         if raw in (None, "", "N/A", "n/a", "none", "null", "unknown"):
             continue
